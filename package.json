@@ -1,0 +1,49 @@
+{
+  "name": "doc-index-sdk",
+  "version": "1.0.0",
+  "description": "Index and search text documents using vector embeddings",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "bin": {
+    "doc-index": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch"
+  },
+  "keywords": [
+    "vector-database",
+    "embeddings",
+    "documentation",
+    "search",
+    "pinecone",
+    "openai"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@mendable/firecrawl-js": "^1.0.10",
+    "@octokit/rest": "^21.0.2",
+    "@pinecone-database/pinecone": "^6.1.2",
+    "commander": "^12.0.0",
+    "dotenv": "^17.2.3",
+    "openai": "^6.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.9.1",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.3"
+  }
+}
+
