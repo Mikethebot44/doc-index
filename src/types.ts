@@ -56,6 +56,28 @@ export interface SearchOptions {
   };
 }
 
+export interface FindDocsOptions {
+  limit?: number;
+  includeGithub?: boolean;
+  includeResearch?: boolean;
+  includePdf?: boolean;
+}
+
+export interface FindDocsResult {
+  url: string;
+  title?: string;
+  description?: string;
+  source?: string;
+  score?: number;
+}
+
+export interface AskAgentOptions {
+  model?: string;
+  temperature?: number;
+  maxToolRoundtrips?: number;
+  includeResourceList?: boolean;
+}
+
 export class DocIndexError extends Error {
   constructor(
     message: string,

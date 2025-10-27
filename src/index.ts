@@ -1,5 +1,14 @@
-import { DocIndexConfig, IndexDocumentationOptions, SearchOptions, SearchResult, Resource } from './types';
-import { indexDocumentation } from './firecrawl';
+import {
+  DocIndexConfig,
+  IndexDocumentationOptions,
+  SearchOptions,
+  SearchResult,
+  Resource,
+  FindDocsOptions,
+  FindDocsResult,
+  AskAgentOptions,
+} from './types';
+import { indexDocumentation, searchFirecrawlUrls } from './firecrawl';
 import { searchDocumentation, searchDocumentationGrouped } from './search';
 import { getOrCreateIndex } from './pinecone';
 import { getEmbeddingDimensions, splitTextToTokenLimit } from './openai';
@@ -59,6 +68,19 @@ export class DocIndexSDK {
     return String(text);
   }
 
+  async askAgent(
+    question: string,
+    options: AskAgentOptions = {}
+  ): Promise<string> {
+    const { runDocIndexAgent } = await import('./agent');
+    return await runDocIndexAgent({
+      sdk: this,
+      question,
+      openaiKey: this.openaiKey,
+      options,
+    });
+  }
+
   async indexDocumentation(
     url: string,
     options: IndexDocumentationOptions = {},
@@ -109,6 +131,16 @@ export class DocIndexSDK {
       query,
       options
     );
+  }
+
+  async findDocs(
+    query: string,
+    options: FindDocsOptions = {}
+  ): Promise<FindDocsResult[]> {
+    if (!this.firecrawlKey) {
+      throw new Error('Firecrawl API key is required for finding documents');
+    }
+    return await searchFirecrawlUrls(this.firecrawlKey, query, options);
   }
 
   async listResources(): Promise<Resource[]> {

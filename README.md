@@ -11,6 +11,7 @@ Index and search documentation using vector embeddings with OpenAI and Pinecone.
 - Tune crawls with prompts plus include/exclude path filters
 - Track indexing progress and status
 - Manage indexed resources (rename, delete, list)
+- Ask an AI agent that can search, summarize, find, or index docs on demand
 
 ## Installation
 
@@ -54,6 +55,18 @@ Options:
 - `--grouped` - Group hits by page URL
 - `--return-page` - Return assembled page markdown for review
 
+### Find Docs
+
+```bash
+doc-index find-docs "How to build GraphQL APIs in Next.js"
+```
+
+Returns Firecrawl search results (URLs only) with optional source filters:
+- `-l, --limit <limit>` - Max results (default: 10)
+- `--github` - Include GitHub repositories and discussions
+- `--research` - Include academic and research sources
+- `--pdf` - Include PDF documents when available
+
 ### Summarize Documentation
 
 ```bash
@@ -63,6 +76,18 @@ doc-index summarize-docs "kicking off ingestion"
 Options:
 - `--top <n>` - Number of pages to include (default: 3)
 - `--model <model>` - OpenAI model alias (default: gpt-5-mini)
+
+### Ask the Agent
+
+```bash
+doc-index ask-agent "How do I integrate Stripe Sigma?"
+```
+
+Options:
+- `--model <model>` - Model alias for the underlying LLM (default: gpt-5-mini)
+- `--steps <count>` - Maximum number of tool round-trips (default: 4)
+- `--temperature <value>` - Sampling temperature (default: 0.2)
+- `--include-resources` - Provide the indexed resource list as additional context
 
 ### List Resources
 
@@ -136,6 +161,26 @@ const results = await sdk.searchDocumentation(
     limit: 5,
   }
 );
+```
+
+### Find Docs
+
+```typescript
+const links = await sdk.findDocs('Most Recent PRs for Supabase', {
+  limit: 5,
+  includeGithub: true,
+});
+```
+
+### Ask the Agent
+
+```typescript
+const answer = await sdk.askAgent('How do I integrate Stripe Sigma?', {
+  model: 'gpt-5-mini',
+  includeResourceList: true,
+  maxToolRoundtrips: 4,
+});
+console.log(answer);
 ```
 
 ### Manage Resources

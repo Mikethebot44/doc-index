@@ -3,7 +3,13 @@ import { generateEmbeddings, splitTextToTokenLimit } from './openai';
 import { upsertVectors, getOrCreateIndex } from './pinecone';
 import { retry } from './utils/retry';
 import { addResource, updateResource } from './resource-manager';
-import { VectorRecord, Resource, IndexDocumentationOptions } from './types';
+import {
+  VectorRecord,
+  Resource,
+  IndexDocumentationOptions,
+  FindDocsOptions,
+  FindDocsResult,
+} from './types';
 import { getEmbeddingDimensions } from './openai';
 
 const FIRECRAWL_API_BASE = 'https://api.firecrawl.dev/v2';
@@ -33,6 +39,50 @@ type CrawlStatusResponse = {
 };
 
 const PENDING_STATUSES = new Set(['pending', 'queued', 'active', 'scraping', 'waiting', 'paused']);
+
+export async function searchFirecrawlUrls(
+  apiKey: string,
+  query: string,
+  options: FindDocsOptions = {}
+): Promise<FindDocsResult[]> {
+  if (!apiKey) {
+    throw new Error('Firecrawl API key is required for search');
+  }
+
+  const trimmedQuery = query?.trim();
+  if (!trimmedQuery) {
+    throw new Error('A non-empty search query is required');
+  }
+
+  const categories: string[] = [];
+  if (options.includeGithub) categories.push('github');
+  if (options.includeResearch) categories.push('research');
+  if (options.includePdf) categories.push('pdf');
+
+  const limitValue = typeof options.limit === 'number' && Number.isFinite(options.limit)
+    ? Math.max(1, Math.floor(options.limit))
+    : undefined;
+
+  const payload: Record<string, unknown> = {
+    query: trimmedQuery,
+    sources: ['web'],
+    limit: limitValue,
+    categories: categories.length > 0 ? categories : undefined,
+  };
+
+  Object.keys(payload).forEach((key) => {
+    if (payload[key] === undefined) {
+      delete payload[key];
+    }
+  });
+
+  const response = await firecrawlRequest<unknown>(apiKey, '/search', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+
+  return parseFirecrawlSearchResults(response, limitValue);
+}
 
 export async function indexDocumentation(
   openaiKey: string,
@@ -284,4 +334,135 @@ async function firecrawlRequest<T>(
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+const URL_KEYS = ['url', 'link', 'href', 'permalink', 'web_url', 'webUrl', 'route', 'target'] as const;
+const TITLE_KEYS = ['title', 'name', 'headline', 'pageTitle'] as const;
+const DESCRIPTION_KEYS = ['description', 'snippet', 'summary', 'content', 'text'] as const;
+const SOURCE_KEYS = ['source', 'category', 'type', 'provider', 'origin'] as const;
+const SCORE_KEYS = ['score', 'relevance', 'rank', 'confidence', 'similarity'] as const;
+
+function parseFirecrawlSearchResults(result: unknown, limit?: number): FindDocsResult[] {
+  const queue: Array<{ value: unknown; inheritedSource?: string }> = [{ value: result }];
+  const visited = new WeakSet<object>();
+  const collected: FindDocsResult[] = [];
+  const seenUrls = new Set<string>();
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current) continue;
+
+    const { value, inheritedSource } = current;
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        queue.push({ value: item, inheritedSource });
+      }
+      continue;
+    }
+
+    if (!value || typeof value !== 'object') {
+      if (typeof value === 'string' && looksLikeUrl(value) && !seenUrls.has(value)) {
+        seenUrls.add(value);
+        collected.push({ url: value, source: inheritedSource });
+      }
+      continue;
+    }
+
+    if (visited.has(value)) {
+      continue;
+    }
+    visited.add(value);
+
+    const record = value as Record<string, unknown>;
+
+    let recordSource = inheritedSource;
+    for (const key of SOURCE_KEYS) {
+      const candidate = record[key];
+      if (typeof candidate === 'string' && candidate.trim().length > 0) {
+        recordSource = candidate;
+        break;
+      }
+    }
+
+    const categories = record.categories;
+    if (!recordSource && Array.isArray(categories)) {
+      const firstCategory = categories.find((cat) => typeof cat === 'string' && cat.trim().length > 0);
+      if (firstCategory) recordSource = firstCategory;
+    }
+
+    let url: string | undefined;
+    for (const key of URL_KEYS) {
+      const candidate = record[key];
+      if (typeof candidate === 'string' && looksLikeUrl(candidate)) {
+        url = candidate;
+        break;
+      }
+    }
+
+    if (!url) {
+      const values = Object.values(record);
+      const inlineUrl = values.find((val) => typeof val === 'string' && looksLikeUrl(val));
+      if (typeof inlineUrl === 'string') {
+        url = inlineUrl;
+      }
+    }
+
+    if (url && !seenUrls.has(url)) {
+      seenUrls.add(url);
+
+      let title: string | undefined;
+      for (const key of TITLE_KEYS) {
+        const candidate = record[key];
+        if (typeof candidate === 'string' && candidate.trim().length > 0) {
+          title = candidate;
+          break;
+        }
+      }
+
+      let description: string | undefined;
+      for (const key of DESCRIPTION_KEYS) {
+        const candidate = record[key];
+        if (typeof candidate === 'string' && candidate.trim().length > 0) {
+          description = candidate;
+          break;
+        }
+      }
+
+      let score: number | undefined;
+      for (const key of SCORE_KEYS) {
+        const candidate = record[key];
+        if (typeof candidate === 'number' && Number.isFinite(candidate)) {
+          score = candidate;
+          break;
+        }
+      }
+
+      collected.push({
+        url,
+        title,
+        description,
+        source: recordSource,
+        score,
+      });
+    }
+
+    for (const valueItem of Object.values(record)) {
+      if (valueItem && (typeof valueItem === 'object' || Array.isArray(valueItem))) {
+        queue.push({ value: valueItem, inheritedSource: recordSource });
+      }
+    }
+  }
+
+  if (!collected.length) {
+    return [];
+  }
+
+  return typeof limit === 'number' && limit > 0 ? collected.slice(0, limit) : collected;
+}
+
+function looksLikeUrl(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return false;
+  return /^https?:\/\//i.test(trimmed);
 }

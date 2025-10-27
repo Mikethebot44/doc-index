@@ -113,6 +113,60 @@ program
   });
 
 program
+  .command('find-docs')
+  .description('Find relevant documentation URLs from the web')
+  .argument('<query>', 'Search query')
+  .option('-l, --limit <limit>', 'Maximum number of results to return', '10')
+  .option('--github', 'Include GitHub repositories and discussions', false)
+  .option('--research', 'Include research papers and academic sources', false)
+  .option('--pdf', 'Include PDF documents when available', false)
+  .action(async (query, options) => {
+    const config = getConfig();
+    const sdk = new DocIndexSDK(config);
+
+    console.log(`Finding documents for: "${query}"`);
+    console.log('');
+
+    try {
+      const parsedLimit = Number.parseInt(options.limit, 10);
+      const limit = Number.isFinite(parsedLimit) ? parsedLimit : undefined;
+      const results = await sdk.findDocs(query, {
+        limit,
+        includeGithub: Boolean(options.github),
+        includeResearch: Boolean(options.research),
+        includePdf: Boolean(options.pdf),
+      });
+
+      if (!results.length) {
+        console.log('No results found.');
+        return;
+      }
+
+      results.forEach((result, index) => {
+        const title = result.title ?? 'Untitled result';
+        console.log(`${index + 1}. ${title}`);
+        console.log(`   URL: ${result.url}`);
+        if (result.source) {
+          console.log(`   Source: ${result.source}`);
+        }
+        if (typeof result.score === 'number') {
+          console.log(`   Score: ${result.score.toFixed(3)}`);
+        }
+        if (result.description) {
+          const snippet = result.description.length > 160
+            ? `${result.description.substring(0, 157)}...`
+            : result.description;
+          console.log(`   Snippet: ${snippet}`);
+        }
+        console.log('');
+      });
+    } catch (error) {
+      console.error('Failed to find documents:', error);
+      process.exit(1);
+    }
+  });
+
+program
   .command('summarize-docs')
   .description('Summarize top matching documentation pages')
   .argument('<query>', 'Query to summarize against')
@@ -130,6 +184,39 @@ program
       console.log(summary);
     } catch (error) {
       console.error('Failed to summarize:', error);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('ask-agent')
+  .description('Ask the Doc Index AI agent a question')
+  .argument('<question...>', 'Question for the agent')
+  .option('--model <model>', 'LLM model to use', 'gpt-5-mini')
+  .option('--steps <count>', 'Maximum number of tool round-trips', '4')
+  .option('--temperature <value>', 'Sampling temperature for the model', '0.2')
+  .option('--include-resources', 'Include the indexed resource list as agent context', false)
+  .action(async (questionWords: string[], options) => {
+    const config = getConfig();
+    const sdk = new DocIndexSDK(config);
+
+    const question = Array.isArray(questionWords) ? questionWords.join(' ') : String(questionWords);
+    const steps = Number.parseInt(options.steps, 10);
+    const temperature = Number.parseFloat(options.temperature);
+
+    console.log(`Agent question: "${question}"`);
+    console.log('');
+
+    try {
+      const response = await sdk.askAgent(question, {
+        model: options.model,
+        maxToolRoundtrips: Number.isFinite(steps) ? steps : undefined,
+        temperature: Number.isFinite(temperature) ? temperature : undefined,
+        includeResourceList: Boolean(options.includeResources),
+      });
+      console.log(response);
+    } catch (error) {
+      console.error('Failed to query the agent:', error);
       process.exit(1);
     }
   });
