@@ -28,6 +28,12 @@ export async function getOrCreateIndex(
         name: indexName,
         dimension: dimensions,
         metric: 'cosine',
+        spec: {
+          serverless: {
+            cloud: 'aws',
+            region: 'us-east-1',
+          },
+        },
       });
     }
     

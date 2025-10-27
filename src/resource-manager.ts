@@ -25,13 +25,14 @@ export async function saveResources(
   resources: Resource[]
 ): Promise<void> {
   try {
-    await index.upsert({
+    const values = Array(3072).fill(0).map(() => 0.001);
+    await index.upsert([{
       id: RESOURCES_METADATA_KEY,
-      values: Array(3072).fill(0),
+      values,
       metadata: {
         resources: JSON.stringify(resources),
       },
-    });
+    }]);
   } catch (error) {
     console.error('Failed to save resources:', error);
   }

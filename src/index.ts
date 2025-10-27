@@ -1,58 +1,62 @@
-import { DocIndexConfig, IndexRepositoryOptions, IndexDocumentationOptions, SearchOptions, SearchResult, Resource } from './types';
-import { indexRepository } from './github';
+import { DocIndexConfig, IndexDocumentationOptions, SearchOptions, SearchResult, Resource } from './types';
 import { indexDocumentation } from './firecrawl';
-import { searchCodebase, searchDocumentation, listCodeRepositories, listDocumentationSources } from './search';
+import { searchDocumentation, searchDocumentationGrouped } from './search';
 import { getOrCreateIndex } from './pinecone';
-import { getEmbeddingDimensions } from './openai';
+import { getEmbeddingDimensions, splitTextToTokenLimit } from './openai';
 
 export class DocIndexSDK {
   private openaiKey: string;
   private pineconeKey: string;
   private indexName: string;
   private firecrawlKey: string | undefined;
-  private githubToken: string | undefined;
 
   constructor(config: DocIndexConfig) {
     this.openaiKey = config.openaiKey;
     this.pineconeKey = config.pineconeKey;
     this.indexName = config.pineconeIndexName || 'doc-index';
     this.firecrawlKey = config.firecrawlKey;
-    this.githubToken = config.githubToken;
   }
 
-  async indexRepository(
-    repoUrl: string,
-    options: IndexRepositoryOptions = {},
-    onProgress?: (current: number, total: number) => void
-  ): Promise<string> {
-    if (!this.githubToken) {
-      throw new Error('GitHub token is required for indexing repositories');
-    }
-    
-    return await indexRepository(
-      this.openaiKey,
-      this.pineconeKey,
-      this.githubToken,
-      this.indexName,
-      repoUrl,
-      options,
-      onProgress
-    );
-  }
-
-  async searchCodebase(
+  async summarizeDocumentation(
     query: string,
-    repositories?: string[],
-    options: SearchOptions = {}
-  ): Promise<SearchResult[]> {
-    return await searchCodebase(
-      this.openaiKey,
-      this.pineconeKey,
-      this.indexName,
-      query,
-      repositories,
-      options
-    );
+    options: { topPages?: number; model?: string } = {}
+  ): Promise<string> {
+    const topPages = options.topPages ?? 3;
+    const modelName = options.model ?? 'gpt-5-mini';
+
+    const pages = await this.searchDocumentationGrouped(query, { returnPage: true });
+    const top = (pages as any[]).slice(0, topPages);
+    if (!top || top.length === 0) {
+      throw new Error('No matching documents found to summarize');
+    }
+
+    const perPageMaxTokens = 2000;
+    const parts: string[] = [];
+    for (const p of top) {
+      const slices = await splitTextToTokenLimit(this.openaiKey, String(p.page || ''), perPageMaxTokens);
+      if (slices.length > 0) parts.push(`URL: ${p.url}\n\n${slices[0]}`);
+    }
+    if (parts.length === 0) {
+      throw new Error('Unable to prepare content for summarization');
+    }
+    const corpus = parts.join('\n\n---\n\n');
+
+    // Dynamic any-typed imports to avoid DTS coupling
+    const aiMod: any = await import('ai');
+    const openaiMod: any = await import('@ai-sdk/openai');
+    const openaiProvider = openaiMod.createOpenAI({ apiKey: this.openaiKey });
+
+    const result: any = await aiMod.generateText({
+      model: openaiProvider(modelName),
+      temperature: 0.3,
+      maxOutputTokens: 400,
+      prompt: `Summarize the key steps and important details succinctly.\n\nQuery: ${query}\n\nDocuments:\n${corpus}`,
+    });
+    const text = result?.text ?? '';
+    if (!text || !String(text).trim()) {
+      throw new Error('No summary returned by the model');
+    }
+    return String(text);
   }
 
   async indexDocumentation(
@@ -64,6 +68,10 @@ export class DocIndexSDK {
       throw new Error('Firecrawl API key is required for indexing documentation');
     }
     
+    const wrappedProgress = onProgress ? (progress: { current: number; total: number }) => {
+      onProgress(progress.current, progress.total);
+    } : undefined;
+    
     return await indexDocumentation(
       this.openaiKey,
       this.pineconeKey,
@@ -71,7 +79,7 @@ export class DocIndexSDK {
       this.indexName,
       url,
       options,
-      onProgress
+      wrappedProgress
     );
   }
 
@@ -86,6 +94,19 @@ export class DocIndexSDK {
       this.indexName,
       query,
       sources,
+      options
+    );
+  }
+
+  async searchDocumentationGrouped(
+    query: string,
+    options: SearchOptions & { returnPage?: boolean; perPageLimit?: number } = {}
+  ) {
+    return await searchDocumentationGrouped(
+      this.openaiKey,
+      this.pineconeKey,
+      this.indexName,
+      query,
       options
     );
   }

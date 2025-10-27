@@ -11,91 +11,19 @@ const program = new Command();
 
 program
   .name('doc-index')
-  .description('Document Indexing SDK - Index and search code and documentation')
+  .description('Document Indexing SDK - Index and search documentation sources')
   .version('1.0.0');
-
-program
-  .command('index-repo')
-  .description('Index a GitHub repository')
-  .argument('<repo-url>', 'GitHub repository URL (e.g., https://github.com/owner/repo)')
-  .option('-b, --branch <branch>', 'Branch to index', 'main')
-  .option('--include <paths...>', 'Include paths (e.g., src/)', [])
-  .option('--exclude <paths...>', 'Exclude paths (e.g., node_modules/)', [])
-  .action(async (repoUrl, options) => {
-    const config = getConfig();
-    const sdk = new DocIndexSDK(config);
-    
-    console.log(`Indexing repository: ${repoUrl}`);
-    console.log(`Branch: ${options.branch}`);
-    console.log('');
-    
-    try {
-      const resourceId = await sdk.indexRepository(
-        repoUrl,
-        {
-          branch: options.branch,
-          includePaths: options.include.length > 0 ? options.include : undefined,
-          excludePaths: options.exclude.length > 0 ? options.exclude : undefined,
-        },
-        (current, total) => {
-          console.log(`Progress: ${current}/${total} chunks indexed`);
-        }
-      );
-      
-      console.log(`Repository indexed successfully: ${resourceId}`);
-    } catch (error) {
-      console.error('Failed to index repository:', error);
-      process.exit(1);
-    }
-  });
-
-program
-  .command('search-code')
-  .description('Search codebase with natural language')
-  .argument('<query>', 'Natural language search query')
-  .option('-r, --repos <repos...>', 'Limit search to specific repositories', [])
-  .option('-l, --limit <limit>', 'Maximum number of results', '10')
-  .option('--lang <langs...>', 'Filter by programming language', [])
-  .action(async (query, options) => {
-    const config = getConfig();
-    const sdk = new DocIndexSDK(config);
-    
-    console.log(`Searching: "${query}"`);
-    console.log('');
-    
-    try {
-      const results = await sdk.searchCodebase(
-        query,
-        options.repos.length > 0 ? options.repos : undefined,
-        {
-          limit: parseInt(options.limit),
-          filter: {
-            language: options.lang.length > 0 ? options.lang : undefined,
-          },
-        }
-      );
-      
-      console.log(`Found ${results.length} results:`);
-      console.log('');
-      
-      results.forEach((result, i) => {
-        console.log(`${i + 1}. ${result.metadata.filePath} (score: ${result.score.toFixed(3)})`);
-        console.log(`   Language: ${result.metadata.language || 'unknown'}`);
-        console.log(`   Content: ${result.metadata.content.substring(0, 100)}...`);
-        console.log('');
-      });
-    } catch (error) {
-      console.error('Failed to search:', error);
-      process.exit(1);
-    }
-  });
 
 program
   .command('index-docs')
   .description('Index documentation from a URL')
   .argument('<url>', 'Documentation URL')
+  .argument('[prompt]', 'Specification prompt to guide crawling')
   .option('-m, --max-pages <max>', 'Maximum pages to crawl', '100')
-  .action(async (url, options) => {
+  .option('-p, --prompt <prompt>', 'Specification prompt override')
+  .option('-i, --include <paths...>', 'Include only paths (substring match)', [])
+  .option('-e, --exclude <paths...>', 'Exclude paths (substring match)', [])
+  .action(async (url, promptArg, options) => {
     const config = getConfig();
     const sdk = new DocIndexSDK(config);
     
@@ -103,10 +31,18 @@ program
     console.log('');
     
     try {
+      const parsedLimit = Number.parseInt(options.maxPages, 10);
+      const maxPages = Number.isFinite(parsedLimit) ? parsedLimit : undefined;
+      const include = Array.isArray(options.include) ? options.include : options.include ? [options.include] : [];
+      const exclude = Array.isArray(options.exclude) ? options.exclude : options.exclude ? [options.exclude] : [];
+
       const resourceId = await sdk.indexDocumentation(
         url,
         {
-          maxPages: parseInt(options.maxPages),
+          maxPages,
+          prompt: options.prompt ?? promptArg,
+          includePaths: include.length > 0 ? include : undefined,
+          excludePaths: exclude.length > 0 ? exclude : undefined,
         },
         (current, total) => {
           console.log(`Progress: ${current}/${total} chunks indexed`);
@@ -126,6 +62,8 @@ program
   .argument('<query>', 'Natural language search query')
   .option('-s, --sources <sources...>', 'Limit search to specific sources', [])
   .option('-l, --limit <limit>', 'Maximum number of results', '10')
+  .option('--grouped', 'Group results by page URL', false)
+  .option('--return-page', 'Return assembled page markdown', false)
   .action(async (query, options) => {
     const config = getConfig();
     const sdk = new DocIndexSDK(config);
@@ -134,24 +72,64 @@ program
     console.log('');
     
     try {
-      const results = await sdk.searchDocumentation(
-        query,
-        options.sources.length > 0 ? options.sources : undefined,
-        {
+      if (options.grouped || options.returnPage) {
+        const grouped = await sdk.searchDocumentationGrouped(query, {
           limit: parseInt(options.limit),
+          returnPage: Boolean(options.returnPage),
+        });
+        if (options.returnPage) {
+          grouped.forEach((page: any, i: number) => {
+            console.log(`${i + 1}. ${page.url} (score: ${page.score.toFixed(3)})`);
+            console.log(page.page.substring(0, 400));
+            console.log('');
+          });
+        } else {
+          grouped.forEach((page: any, i: number) => {
+            console.log(`${i + 1}. ${page.url} (score: ${page.score.toFixed(3)})`);
+            page.snippets.forEach((s: string, j: number) => {
+              console.log(`   - ${j + 1}: ${s.substring(0, 120)}...`);
+            });
+            console.log('');
+          });
         }
-      );
-      
-      console.log(`Found ${results.length} results:`);
-      console.log('');
-      
-      results.forEach((result, i) => {
-        console.log(`${i + 1}. ${result.metadata.url} (score: ${result.score.toFixed(3)})`);
-        console.log(`   Content: ${result.metadata.content.substring(0, 100)}...`);
+      } else {
+        const results = await sdk.searchDocumentation(
+          query,
+          options.sources.length > 0 ? options.sources : undefined,
+          { limit: parseInt(options.limit) }
+        );
+        console.log(`Found ${results.length} results:`);
         console.log('');
-      });
+        results.forEach((result, i) => {
+          console.log(`${i + 1}. ${result.metadata.url} (score: ${result.score.toFixed(3)})`);
+          console.log(`   Content: ${result.metadata.content.substring(0, 100)}...`);
+          console.log('');
+        });
+      }
     } catch (error) {
       console.error('Failed to search:', error);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('summarize-docs')
+  .description('Summarize top matching documentation pages')
+  .argument('<query>', 'Query to summarize against')
+  .option('--top <n>', 'Number of top pages', '3')
+  .option('--model <model>', 'LLM model to use', 'gpt-5-mini')
+  .action(async (query, options) => {
+    const config = getConfig();
+    const sdk = new DocIndexSDK(config);
+    try {
+      console.log(`Summarizing top ${options.top} pages with model: ${options.model}`);
+      const summary = await sdk.summarizeDocumentation(query, {
+        topPages: parseInt(options.top),
+        model: options.model,
+      });
+      console.log(summary);
+    } catch (error) {
+      console.error('Failed to summarize:', error);
       process.exit(1);
     }
   });
@@ -261,7 +239,6 @@ function getConfig(): DocIndexConfig {
   const openaiKey = process.env.OPENAI_API_KEY;
   const pineconeKey = process.env.PINECONE_API_KEY;
   const firecrawlKey = process.env.FIRECRAWL_API_KEY;
-  const githubToken = process.env.GITHUB_TOKEN;
   
   if (!openaiKey) {
     throw new Error('OPENAI_API_KEY environment variable is required');
@@ -275,9 +252,7 @@ function getConfig(): DocIndexConfig {
     openaiKey,
     pineconeKey,
     firecrawlKey,
-    githubToken,
   };
 }
 
 program.parse();
-

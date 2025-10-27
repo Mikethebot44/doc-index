@@ -1,13 +1,12 @@
+export type VectorType = 'doc';
+
 export interface VectorMetadata {
-  type: 'code' | 'doc';
+  type: VectorType;
   resourceId: string;
   resourceName: string;
-  filePath: string;
   content: string;
-  startLine?: number;
-  endLine?: number;
-  language?: string;
   url?: string;
+  level?: 'page' | 'chunk';
   indexed: number;
 }
 
@@ -20,7 +19,7 @@ export interface VectorRecord {
 export interface Resource {
   id: string;
   name: string;
-  type: 'code' | 'doc';
+  type: VectorType;
   status: 'indexing' | 'ready' | 'error';
   chunksProcessed: number;
   totalChunks: number;
@@ -40,27 +39,20 @@ export interface DocIndexConfig {
   pineconeKey: string;
   pineconeIndexName?: string;
   firecrawlKey?: string;
-  githubToken?: string;
-}
-
-export interface IndexRepositoryOptions {
-  branch?: string;
-  includePaths?: string[];
-  excludePaths?: string[];
 }
 
 export interface IndexDocumentationOptions {
   maxPages?: number;
-  includePatterns?: string[];
-  excludePatterns?: string[];
+  prompt?: string;
+  includePaths?: string[];
+  excludePaths?: string[];
 }
 
 export interface SearchOptions {
   limit?: number;
   filter?: {
     resourceId?: string[];
-    language?: string[];
-    filePath?: string;
+    url?: string;
   };
 }
 

@@ -1,12 +1,14 @@
 # Document Indexing SDK
 
-Index and search code and documentation using vector embeddings with OpenAI and Pinecone.
+Index and search documentation using vector embeddings with OpenAI and Pinecone.
 
 ## Features
 
-- Index GitHub repositories for intelligent code search
 - Index documentation from any URL using Firecrawl
-- Natural language search across your indexed resources
+- Natural language search across indexed pages
+- Summarize top matching documentation hits
+- Semantic chunking keeps related sentences together for better recall
+- Tune crawls with prompts plus include/exclude path filters
 - Track indexing progress and status
 - Manage indexed resources (rename, delete, list)
 
@@ -23,47 +25,22 @@ Set environment variables for API keys:
 ```bash
 export OPENAI_API_KEY="your-openai-key"
 export PINECONE_API_KEY="your-pinecone-key"
-export FIRECRAWL_API_KEY="your-firecrawl-key"  # Optional, for documentation
-export GITHUB_TOKEN="your-github-token"  # Optional, for private repos
+export FIRECRAWL_API_KEY="your-firecrawl-key"
 ```
 
 ## CLI Usage
 
-### Index a GitHub Repository
-
-```bash
-doc-index index-repo https://github.com/owner/repo --branch main
-```
-
-Options:
-- `--branch <branch>` - Branch to index (default: main)
-- `--include <paths...>` - Include only these paths
-- `--exclude <paths...>` - Exclude these paths
-
-### Search Codebase
-
-```bash
-doc-index search-code "how to handle authentication"
-```
-
-Options:
-- `-r, --repos <repos...>` - Limit to specific repositories
-- `-l, --limit <limit>` - Max results (default: 10)
-- `--lang <langs...>` - Filter by language
-
-Example:
-```bash
-doc-index search-code "error handling pattern" --lang typescript javascript
-```
-
 ### Index Documentation
 
 ```bash
-doc-index index-docs https://docs.example.com
+doc-index index-docs https://docs.example.com "Ignore marketing and blog pages"
 ```
 
 Options:
 - `-m, --max-pages <max>` - Maximum pages to crawl
+- `-i, --include <paths...>` - Only crawl URLs containing these substrings
+- `-e, --exclude <paths...>` - Skip URLs containing these substrings
+- `-p, --prompt <prompt>` - Provide the specification prompt via flag
 
 ### Search Documentation
 
@@ -74,6 +51,18 @@ doc-index search-docs "how to configure the API"
 Options:
 - `-s, --sources <sources...>` - Limit to specific sources
 - `-l, --limit <limit>` - Max results (default: 10)
+- `--grouped` - Group hits by page URL
+- `--return-page` - Return assembled page markdown for review
+
+### Summarize Documentation
+
+```bash
+doc-index summarize-docs "kicking off ingestion"
+```
+
+Options:
+- `--top <n>` - Number of pages to include (default: 3)
+- `--model <model>` - OpenAI model alias (default: gpt-5-mini)
 
 ### List Resources
 
@@ -109,48 +98,18 @@ import { DocIndexSDK } from 'doc-index-sdk';
 const sdk = new DocIndexSDK({
   openaiKey: process.env.OPENAI_API_KEY!,
   pineconeKey: process.env.PINECONE_API_KEY!,
-  firecrawlKey: process.env.FIRECRAWL_API_KEY,
-  githubToken: process.env.GITHUB_TOKEN,
+  firecrawlKey: process.env.FIRECRAWL_API_KEY!,
 });
 ```
 
-### Index a Repository
+### Summarize Documentation
 
 ```typescript
-const resourceId = await sdk.indexRepository(
-  'https://github.com/owner/repo',
-  {
-    branch: 'main',
-    includePaths: ['src/'],
-    excludePaths: ['node_modules/', 'dist/'],
-  },
-  (current, total) => {
-    console.log(`Progress: ${current}/${total}`);
-  }
-);
-
-console.log('Indexed:', resourceId);
-```
-
-### Search Codebase
-
-```typescript
-const results = await sdk.searchCodebase(
-  'how to handle authentication errors',
-  ['repo:owner/repo:main'],
-  {
-    limit: 10,
-    filter: {
-      language: ['typescript', 'javascript'],
-    },
-  }
-);
-
-results.forEach(result => {
-  console.log(result.metadata.filePath);
-  console.log(result.score);
-  console.log(result.metadata.content);
+const summary = await sdk.summarizeDocumentation('kick off ingestion flow', {
+  topPages: 3,
+  model: 'gpt-5-mini',
 });
+console.log(summary);
 ```
 
 ### Index Documentation
@@ -159,7 +118,10 @@ results.forEach(result => {
 const resourceId = await sdk.indexDocumentation(
   'https://docs.example.com',
   {
-    maxPages: 100,
+    maxPages: 150,
+    prompt: 'Focus on API reference pages and skip marketing content.',
+    includePaths: ['/api', '/guides'],
+    excludePaths: ['/blog', '/changelog'],
   }
 );
 ```
@@ -197,13 +159,12 @@ await sdk.deleteResource('resource-id');
 - **OpenAI**: Generates text embeddings using `text-embedding-3-large`
 - **Pinecone**: Stores and queries vectors with cosine similarity
 - **Firecrawl**: Crawls and scrapes documentation pages
-- **Octokit**: Fetches repository files from GitHub
 
 ### Chunking Strategy
 
-- **Code files**: Parsed by function/class boundaries
-- **Markdown**: Split by headers (H1, H2, H3)
-- **Plain text**: Sliding window with 200 token overlap
+- **Semantic markdown**: Sentence-level embeddings flag topic breaks, then chunks merge to ~1.2k tokens
+- **Page anchors**: Each page stores an aggregate vector for summary retrieval
+- **Token guardrails**: Long sections recursively split to stay under model limits
 
 ### Resource Tracking
 
