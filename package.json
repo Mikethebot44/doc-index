@@ -1,6 +1,6 @@
 {
   "name": "doc-index-sdk",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Index and search text documents using vector embeddings",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
