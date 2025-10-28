@@ -2,7 +2,7 @@ import { chunkMarkdownSmart, TextChunk } from './chunking';
 import { generateEmbeddings, splitTextToTokenLimit } from './openai';
 import { upsertVectors, getOrCreateIndex } from './pinecone';
 import { retry } from './utils/retry';
-import { addResource, updateResource } from './resource-manager';
+import { addResource, updateResource, getResource, deleteResource, deleteResourceFromPinecone } from './resource-manager';
 import {
   VectorRecord,
   Resource,
@@ -91,16 +91,41 @@ export async function indexDocumentation(
   indexName: string,
   url: string,
   options: IndexDocumentationOptions = {},
-  progressCallback?: (progress: { current: number; total: number }) => void
+  progressCallback?: (progress: { current: number; total: number }) => void,
+  logCallback?: (message: string, level?: 'info' | 'error') => void
 ): Promise<string> {
   const resourceId = `doc:${url}`;
   const resourceName = new URL(url).hostname;
+  const log = (message: string, level: 'info' | 'error' = 'info') => {
+    if (typeof logCallback === 'function') {
+      logCallback(message, level);
+      return;
+    }
+    if (level === 'error') {
+      console.error(message);
+    } else {
+      console.log(message);
+    }
+  };
   
   const index = await getOrCreateIndex(
     pineconeKey,
     indexName,
     getEmbeddingDimensions()
   );
+
+  const existingResource = await getResource(index, resourceId);
+  if (existingResource) {
+    log(`Replacing existing resource for ${url}`);
+    try {
+      await deleteResourceFromPinecone(index, resourceId);
+      await deleteResource(index, resourceId);
+      log(`Removed previous resource data for ${url}`);
+    } catch (cleanupError) {
+      const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+      log(`Failed to remove previous resource data for ${url}: ${message}`, 'error');
+    }
+  }
   
   const resource: Resource = {
     id: resourceId,
@@ -114,6 +139,7 @@ export async function indexDocumentation(
   };
   
   await addResource(index, resource);
+  log(`Started indexing for ${url}`);
   
   try {
     const crawlData = await retry(
@@ -141,7 +167,7 @@ export async function indexDocumentation(
         maxTokens: 1800,
         similarityDrop: 0.2,
       });
-      console.log(`Scraped: ${pageUrl}`);
+      log(`Scraped: ${pageUrl}`);
       pages.push({ url: pageUrl, content, chunks });
     }
 
@@ -197,13 +223,15 @@ export async function indexDocumentation(
       await upsertVectors(index, vectors);
       processed += tokenSafeTexts.length;
       await updateResource(index, resourceId, { chunksProcessed: processed, updatedAt: Date.now() });
-      console.log(`Indexed: ${page.url} (${tokenSafeTexts.length} chunks)`);
+      log(`Indexed: ${page.url} (${tokenSafeTexts.length} chunks)`);
       if (progressCallback) progressCallback({ current: processed, total: totalChunks });
     }
 
     await updateResource(index, resourceId, { status: 'ready', updatedAt: Date.now() });
+    log(`Completed indexing for ${url}`);
     return resourceId;
   } catch (error) {
+    log(`Indexing failed for ${url}: ${error instanceof Error ? error.message : String(error)}`, 'error');
     await updateResource(index, resourceId, {
       status: 'error',
       error: error instanceof Error ? error.message : String(error),

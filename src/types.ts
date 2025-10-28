@@ -48,6 +48,34 @@ export interface IndexDocumentationOptions {
   excludePaths?: string[];
 }
 
+export type IndexJobStatus = 'queued' | 'in-progress' | 'completed' | 'failed';
+
+export interface IndexJobProgress {
+  current: number;
+  total: number;
+}
+
+export interface IndexJobLogEntry {
+  timestamp: number;
+  level: 'info' | 'error';
+  message: string;
+}
+
+export interface IndexJob {
+  id: string;
+  resourceId: string;
+  url: string;
+  options: IndexDocumentationOptions;
+  status: IndexJobStatus;
+  progress: IndexJobProgress;
+  createdAt: number;
+  updatedAt: number;
+  startedAt?: number;
+  completedAt?: number;
+  error?: string;
+  logs: IndexJobLogEntry[];
+}
+
 export interface SearchOptions {
   limit?: number;
   filter?: {
@@ -76,6 +104,7 @@ export interface AskAgentOptions {
   temperature?: number;
   maxToolRoundtrips?: number;
   includeResourceList?: boolean;
+  onToken?: (chunk: string) => void;
 }
 
 export class DocIndexError extends Error {

@@ -9,6 +9,84 @@ dotenv.config();
 
 const program = new Command();
 
+const DEFAULT_LOADING_MESSAGES = [
+  'Thinking...',
+  'Researching...',
+  'Gathering documentation...',
+  'Crunching embeddings...',
+  'Almost there...',
+];
+
+const INDEX_LOADING_MESSAGES = [
+  'Preparing crawl request...',
+  'Contacting Firecrawl...',
+  'Processing pages...',
+  'Embedding content...',
+];
+
+const SEARCH_LOADING_MESSAGES = [
+  'Thinking...',
+  'Searching the index...',
+  'Ranking matches...',
+  'Collecting snippets...',
+];
+
+const FIND_LOADING_MESSAGES = [
+  'Researching...',
+  'Exploring the web...',
+  'Collecting candidate sources...',
+];
+
+const SUMMARIZE_LOADING_MESSAGES = [
+  'Thinking...',
+  'Reviewing top documents...',
+  'Drafting summary...',
+];
+
+const AGENT_LOADING_MESSAGES = [
+  'Thinking...',
+  'Researching documentation...',
+  'Consulting tools...',
+  'Synthesizing answer...',
+];
+
+function startLoading(messages: string[] = DEFAULT_LOADING_MESSAGES, intervalMs = 1200): () => void {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return () => {};
+  }
+  const supportsCursor =
+    Boolean(process.stdout?.isTTY) &&
+    typeof process.stdout.clearLine === 'function' &&
+    typeof process.stdout.cursorTo === 'function';
+
+  if (!supportsCursor) {
+    return () => {};
+  }
+
+  let index = Math.floor(Math.random() * messages.length);
+  let active = true;
+
+  const render = () => {
+    if (!active) return;
+    const message = messages[index % messages.length];
+    index += 1;
+    process.stdout.clearLine(0);
+    process.stdout.cursorTo(0);
+    process.stdout.write(message);
+  };
+
+  render();
+  const timer = setInterval(render, intervalMs);
+
+  return () => {
+    if (!active) return;
+    active = false;
+    clearInterval(timer);
+    process.stdout.clearLine(0);
+    process.stdout.cursorTo(0);
+  };
+}
+
 program
   .name('doc-index')
   .description('Document Indexing SDK - Index and search documentation sources')
@@ -23,6 +101,7 @@ program
   .option('-p, --prompt <prompt>', 'Specification prompt override')
   .option('-i, --include <paths...>', 'Include only paths (substring match)', [])
   .option('-e, --exclude <paths...>', 'Exclude paths (substring match)', [])
+  .option('-b, --background', 'Run indexing in the background', false)
   .action(async (url, promptArg, options) => {
     const config = getConfig();
     const sdk = new DocIndexSDK(config);
@@ -35,21 +114,55 @@ program
       const maxPages = Number.isFinite(parsedLimit) ? parsedLimit : undefined;
       const include = Array.isArray(options.include) ? options.include : options.include ? [options.include] : [];
       const exclude = Array.isArray(options.exclude) ? options.exclude : options.exclude ? [options.exclude] : [];
+      const requestOptions = {
+        maxPages,
+        prompt: options.prompt ?? promptArg,
+        includePaths: include.length > 0 ? include : undefined,
+        excludePaths: exclude.length > 0 ? exclude : undefined,
+      };
 
-      const resourceId = await sdk.indexDocumentation(
-        url,
-        {
-          maxPages,
-          prompt: options.prompt ?? promptArg,
-          includePaths: include.length > 0 ? include : undefined,
-          excludePaths: exclude.length > 0 ? exclude : undefined,
-        },
-        (current, total) => {
-          console.log(`Progress: ${current}/${total} chunks indexed`);
-        }
-      );
-      
-      console.log(`Documentation indexed successfully: ${resourceId}`);
+      if (options.background) {
+        const job = await sdk.enqueueIndexDocumentation(url, requestOptions);
+        console.log(`Queued background indexing job: ${job.id}`);
+        console.log(`Resource ID: ${job.resourceId}`);
+        console.log('');
+        console.log('Track progress with: doc-index status', job.id);
+        setImmediate(() => process.exit(0));
+        return;
+      }
+
+      const stopIndicatorInternal = startLoading(INDEX_LOADING_MESSAGES);
+      let spinnerActive = true;
+      const stopSpinner = () => {
+        if (!spinnerActive) return;
+        spinnerActive = false;
+        stopIndicatorInternal();
+      };
+
+      try {
+        const resourceId = await sdk.indexDocumentation(
+          url,
+          requestOptions,
+          (current, total) => {
+            stopSpinner();
+            console.log(`Progress: ${current}/${total} chunks indexed`);
+          },
+          (message, level = 'info') => {
+            stopSpinner();
+            if (level === 'error') {
+              console.error(message);
+            } else {
+              console.log(message);
+            }
+          }
+        );
+        
+        stopSpinner();
+        console.log(`Documentation indexed successfully: ${resourceId}`);
+      } catch (error) {
+        stopSpinner();
+        throw error;
+      }
     } catch (error) {
       console.error('Failed to index documentation:', error);
       process.exit(1);
@@ -71,12 +184,21 @@ program
     console.log(`Searching: "${query}"`);
     console.log('');
     
+    const stopIndicatorInternal = startLoading(SEARCH_LOADING_MESSAGES);
+    let spinnerActive = true;
+    const stopSpinner = () => {
+      if (!spinnerActive) return;
+      spinnerActive = false;
+      stopIndicatorInternal();
+    };
+
     try {
       if (options.grouped || options.returnPage) {
         const grouped = await sdk.searchDocumentationGrouped(query, {
           limit: parseInt(options.limit),
           returnPage: Boolean(options.returnPage),
         });
+        stopSpinner();
         if (options.returnPage) {
           grouped.forEach((page: any, i: number) => {
             console.log(`${i + 1}. ${page.url} (score: ${page.score.toFixed(3)})`);
@@ -98,6 +220,7 @@ program
           options.sources.length > 0 ? options.sources : undefined,
           { limit: parseInt(options.limit) }
         );
+        stopSpinner();
         console.log(`Found ${results.length} results:`);
         console.log('');
         results.forEach((result, i) => {
@@ -106,7 +229,9 @@ program
           console.log('');
         });
       }
+      stopSpinner();
     } catch (error) {
+      stopSpinner();
       console.error('Failed to search:', error);
       process.exit(1);
     }
@@ -127,6 +252,14 @@ program
     console.log(`Finding documents for: "${query}"`);
     console.log('');
 
+    const stopIndicatorInternal = startLoading(FIND_LOADING_MESSAGES);
+    let spinnerActive = true;
+    const stopSpinner = () => {
+      if (!spinnerActive) return;
+      spinnerActive = false;
+      stopIndicatorInternal();
+    };
+
     try {
       const parsedLimit = Number.parseInt(options.limit, 10);
       const limit = Number.isFinite(parsedLimit) ? parsedLimit : undefined;
@@ -136,6 +269,7 @@ program
         includeResearch: Boolean(options.research),
         includePdf: Boolean(options.pdf),
       });
+      stopSpinner();
 
       if (!results.length) {
         console.log('No results found.');
@@ -161,6 +295,7 @@ program
         console.log('');
       });
     } catch (error) {
+      stopSpinner();
       console.error('Failed to find documents:', error);
       process.exit(1);
     }
@@ -175,14 +310,23 @@ program
   .action(async (query, options) => {
     const config = getConfig();
     const sdk = new DocIndexSDK(config);
+    console.log(`Summarizing top ${options.top} pages with model: ${options.model}`);
+    const stopIndicatorInternal = startLoading(SUMMARIZE_LOADING_MESSAGES);
+    let spinnerActive = true;
+    const stopSpinner = () => {
+      if (!spinnerActive) return;
+      spinnerActive = false;
+      stopIndicatorInternal();
+    };
     try {
-      console.log(`Summarizing top ${options.top} pages with model: ${options.model}`);
       const summary = await sdk.summarizeDocumentation(query, {
         topPages: parseInt(options.top),
         model: options.model,
       });
+      stopSpinner();
       console.log(summary);
     } catch (error) {
+      stopSpinner();
       console.error('Failed to summarize:', error);
       process.exit(1);
     }
@@ -206,6 +350,14 @@ program
 
     console.log(`Agent question: "${question}"`);
     console.log('');
+    const stopIndicatorInternal = startLoading(AGENT_LOADING_MESSAGES, 1500);
+    let spinnerActive = true;
+    const stopSpinner = () => {
+      if (!spinnerActive) return;
+      spinnerActive = false;
+      stopIndicatorInternal();
+    };
+    let sawStreamChunk = false;
 
     try {
       const response = await sdk.askAgent(question, {
@@ -213,9 +365,26 @@ program
         maxToolRoundtrips: Number.isFinite(steps) ? steps : undefined,
         temperature: Number.isFinite(temperature) ? temperature : undefined,
         includeResourceList: Boolean(options.includeResources),
+        onToken: chunk => {
+          if (!chunk) return;
+          if (!sawStreamChunk) {
+            stopSpinner();
+            sawStreamChunk = true;
+          }
+          process.stdout.write(chunk);
+        },
       });
-      console.log(response);
+      if (!sawStreamChunk) {
+        stopSpinner();
+        console.log(response);
+      } else {
+        stopSpinner();
+        if (!response.endsWith('\n')) {
+          console.log('');
+        }
+      }
     } catch (error) {
+      stopSpinner();
       console.error('Failed to query the agent:', error);
       process.exit(1);
     }
@@ -258,14 +427,61 @@ program
 
 program
   .command('status')
-  .description('Check status of a resource')
-  .argument('<resource-id>', 'Resource ID')
-  .action(async (resourceId) => {
+  .description('Check status of a resource or background job')
+  .argument('<id>', 'Resource ID or job ID')
+  .action(async (identifier) => {
     const config = getConfig();
     const sdk = new DocIndexSDK(config);
     
     try {
-      const resource = await sdk.checkResourceStatus(resourceId);
+      const job = await sdk.getIndexJob(identifier);
+      if (job) {
+        console.log(`Job ID: ${job.id}`);
+        console.log(`URL: ${job.url}`);
+        console.log(`Status: ${job.status}`);
+        console.log(`Progress: ${job.progress.current}/${job.progress.total}`);
+        if (job.error) {
+          console.log(`Error: ${job.error}`);
+        }
+        console.log(`Created: ${new Date(job.createdAt).toISOString()}`);
+        if (job.startedAt) {
+          console.log(`Started: ${new Date(job.startedAt).toISOString()}`);
+        }
+        if (job.completedAt) {
+          console.log(`Completed: ${new Date(job.completedAt).toISOString()}`);
+        }
+        if (job.resourceId) {
+          console.log(`Resource ID: ${job.resourceId}`);
+          try {
+            const resource = await sdk.checkResourceStatus(job.resourceId);
+            if (resource) {
+              console.log('');
+              console.log('Latest resource state:');
+              console.log(`   Status: ${resource.status}`);
+              console.log(`   Chunks: ${resource.chunksProcessed}/${resource.totalChunks}`);
+              console.log(`   Updated: ${new Date(resource.updatedAt).toISOString()}`);
+              if (resource.error) {
+                console.log(`   Error: ${resource.error}`);
+              }
+            }
+          } catch {
+            // Ignore resource lookup failures; job data is primary.
+          }
+        }
+        if (job.logs && job.logs.length > 0) {
+          const recentLogs = job.logs.slice(-20);
+          console.log('');
+          console.log('Logs:');
+          recentLogs.forEach(entry => {
+            const timestamp = new Date(entry.timestamp).toISOString();
+            const level = entry.level.toUpperCase();
+            console.log(`   [${timestamp}] ${level} ${entry.message}`);
+          });
+        }
+        return;
+      }
+
+      const resource = await sdk.checkResourceStatus(identifier);
       
       if (!resource) {
         console.log('Resource not found.');

@@ -1,3 +1,8 @@
+import { fork } from 'child_process';
+import { randomUUID } from 'crypto';
+import { existsSync } from 'fs';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
 import {
   DocIndexConfig,
   IndexDocumentationOptions,
@@ -7,11 +12,79 @@ import {
   FindDocsOptions,
   FindDocsResult,
   AskAgentOptions,
+  IndexJob,
 } from './types';
 import { indexDocumentation, searchFirecrawlUrls } from './firecrawl';
 import { searchDocumentation, searchDocumentationGrouped } from './search';
 import { getOrCreateIndex } from './pinecone';
 import { getEmbeddingDimensions, splitTextToTokenLimit } from './openai';
+import {
+  listJobs as loadJobs,
+  getJob as loadJob,
+  upsertJob,
+  updateJob as patchJob,
+  appendJobLog,
+} from './job-store';
+
+const workerModulePath = resolveWorkerModulePath();
+
+function resolveCurrentDir(): string {
+  if (typeof __dirname === 'string' && __dirname.length > 0) {
+    return __dirname;
+  }
+  return dirname(fileURLToPath(import.meta.url));
+}
+
+function resolveWorkerModulePath(): string {
+  const currentDir = resolveCurrentDir();
+  const candidates = ['background-worker.js', 'background-worker.cjs', 'background-worker.mjs'];
+  for (const candidate of candidates) {
+    const candidatePath = join(currentDir, candidate);
+    if (existsSync(candidatePath)) {
+      return candidatePath;
+    }
+  }
+  return join(currentDir, 'background-worker.js');
+}
+
+function formatJobError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === 'string') {
+    return error;
+  }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return 'Unknown error';
+  }
+}
+
+function generateJobId(): string {
+  try {
+    return `job_${randomUUID()}`;
+  } catch {
+    return `job_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+}
+
+function sanitizeIndexOptions(options: IndexDocumentationOptions = {}): IndexDocumentationOptions {
+  const sanitized: IndexDocumentationOptions = {};
+  if (typeof options.maxPages === 'number' && Number.isFinite(options.maxPages)) {
+    sanitized.maxPages = options.maxPages;
+  }
+  if (typeof options.prompt === 'string') {
+    sanitized.prompt = options.prompt;
+  }
+  if (Array.isArray(options.includePaths)) {
+    sanitized.includePaths = [...options.includePaths];
+  }
+  if (Array.isArray(options.excludePaths)) {
+    sanitized.excludePaths = [...options.excludePaths];
+  }
+  return sanitized;
+}
 
 export class DocIndexSDK {
   private openaiKey: string;
@@ -84,7 +157,8 @@ export class DocIndexSDK {
   async indexDocumentation(
     url: string,
     options: IndexDocumentationOptions = {},
-    onProgress?: (current: number, total: number) => void
+    onProgress?: (current: number, total: number) => void,
+    onLog?: (message: string, level?: 'info' | 'error') => void
   ): Promise<string> {
     if (!this.firecrawlKey) {
       throw new Error('Firecrawl API key is required for indexing documentation');
@@ -101,8 +175,101 @@ export class DocIndexSDK {
       this.indexName,
       url,
       options,
-      wrappedProgress
+      wrappedProgress,
+      onLog
     );
+  }
+
+  async enqueueIndexDocumentation(
+    url: string,
+    options: IndexDocumentationOptions = {}
+  ): Promise<IndexJob> {
+    if (!this.firecrawlKey) {
+      throw new Error('Firecrawl API key is required for indexing documentation');
+    }
+
+    const jobId = generateJobId();
+    const resourceId = `doc:${url}`;
+    const sanitizedOptions = sanitizeIndexOptions(options);
+    const now = Date.now();
+
+    const job: IndexJob = {
+      id: jobId,
+      resourceId,
+      url,
+      options: sanitizedOptions,
+      status: 'queued',
+      progress: { current: 0, total: 0 },
+      createdAt: now,
+      updatedAt: now,
+      logs: [],
+    };
+
+    await upsertJob(job);
+    await appendJobLog(jobId, `Queued background indexing for ${url}`);
+
+    try {
+      this.spawnBackgroundWorker(job);
+    } catch (error) {
+      const message = formatJobError(error);
+      await patchJob(jobId, { status: 'failed', error: message });
+      await appendJobLog(jobId, `Failed to launch background worker: ${message}`, 'error');
+      throw new Error(`Failed to start background index job: ${message}`);
+    }
+
+    return job;
+  }
+
+  async listIndexJobs(): Promise<IndexJob[]> {
+    return await loadJobs();
+  }
+
+  async getIndexJob(jobId: string): Promise<IndexJob | undefined> {
+    if (!jobId) {
+      return undefined;
+    }
+    return await loadJob(jobId);
+  }
+
+  private spawnBackgroundWorker(job: IndexJob): void {
+    const envConfig = JSON.stringify({
+      openaiKey: this.openaiKey,
+      pineconeKey: this.pineconeKey,
+      pineconeIndexName: this.indexName,
+      firecrawlKey: this.firecrawlKey,
+    });
+
+    const child = fork(workerModulePath, [], {
+      detached: true,
+      stdio: 'ignore',
+      env: {
+        ...process.env,
+        DOC_INDEX_JOB_ID: job.id,
+        DOC_INDEX_CONFIG: envConfig,
+      },
+    });
+
+    child.on('error', error => {
+      const message = formatJobError(error);
+      void patchJob(job.id, {
+        status: 'failed',
+        error: message,
+      });
+      void appendJobLog(job.id, `Background worker error: ${message}`, 'error');
+    });
+
+    child.on('exit', code => {
+      if (typeof code === 'number' && code !== 0) {
+        const message = `Background worker exited with code ${code}`;
+        void patchJob(job.id, {
+          status: 'failed',
+          error: message,
+        });
+        void appendJobLog(job.id, message, 'error');
+      }
+    });
+
+    child.unref();
   }
 
   async searchDocumentation(
