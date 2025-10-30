@@ -599,12 +599,16 @@ program
   .description('Rename a resource')
   .argument('<resource-id>', 'Resource ID')
   .argument('<new-name>', 'New name')
-  .action(async (resourceId, newName) => {
+  .option('-n, --namespace <name>', 'Pinecone namespace to target', '__default__')
+  .action(async (resourceId, newName, options) => {
     const config = getConfig();
-    const sdk = new DocIndexSDK(config);
+    const namespace = typeof options.namespace === 'string' && options.namespace.trim().length > 0
+      ? options.namespace
+      : config.pineconeNamespace ?? '__default__';
+    const sdk = new DocIndexSDK({ ...config, pineconeNamespace: namespace });
     
     try {
-      await sdk.renameResource(resourceId, newName);
+      await sdk.renameResource(resourceId, newName, namespace);
       console.log(`Resource renamed to: ${newName}`);
     } catch (error) {
       console.error('Failed to rename resource:', error);
@@ -616,12 +620,16 @@ program
   .command('delete')
   .description('Delete a resource')
   .argument('<resource-id>', 'Resource ID')
-  .action(async (resourceId) => {
+  .option('-n, --namespace <name>', 'Pinecone namespace to target', '__default__')
+  .action(async (resourceId, options) => {
     const config = getConfig();
-    const sdk = new DocIndexSDK(config);
+    const namespace = typeof options.namespace === 'string' && options.namespace.trim().length > 0
+      ? options.namespace
+      : config.pineconeNamespace ?? '__default__';
+    const sdk = new DocIndexSDK({ ...config, pineconeNamespace: namespace });
     
     try {
-      await sdk.deleteResource(resourceId);
+      await sdk.deleteResource(resourceId, namespace);
       console.log(`Resource deleted: ${resourceId}`);
     } catch (error) {
       console.error('Failed to delete resource:', error);
