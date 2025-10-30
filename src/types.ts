@@ -39,6 +39,7 @@ export interface DocIndexConfig {
   pineconeKey: string;
   pineconeIndexName?: string;
   firecrawlKey?: string;
+  pineconeNamespace?: string;
 }
 
 export interface CreateNamespaceOptions {
@@ -59,6 +60,7 @@ export interface IndexDocumentationOptions {
   prompt?: string;
   includePaths?: string[];
   excludePaths?: string[];
+  namespace?: string;
 }
 
 export type IndexJobStatus = 'queued' | 'in-progress' | 'completed' | 'failed';
@@ -95,6 +97,7 @@ export interface SearchOptions {
     resourceId?: string[];
     url?: string;
   };
+  namespace?: string;
 }
 
 export interface FindDocsOptions {
@@ -118,6 +121,7 @@ export interface AskAgentOptions {
   maxToolRoundtrips?: number;
   includeResourceList?: boolean;
   onToken?: (chunk: string) => void;
+  namespace?: string;
 }
 
 export class DocIndexError extends Error {

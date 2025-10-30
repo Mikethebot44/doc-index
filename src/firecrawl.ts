@@ -1,6 +1,6 @@
 import { chunkMarkdownSmart, TextChunk } from './chunking';
 import { generateEmbeddings, splitTextToTokenLimit } from './openai';
-import { upsertVectors, getOrCreateIndex } from './pinecone';
+import { upsertVectors, getOrCreateIndex, normalizeNamespace } from './pinecone';
 import { retry } from './utils/retry';
 import { addResource, updateResource, getResource, deleteResource, deleteResourceFromPinecone } from './resource-manager';
 import {
@@ -96,6 +96,7 @@ export async function indexDocumentation(
 ): Promise<string> {
   const resourceId = `doc:${url}`;
   const resourceName = new URL(url).hostname;
+  const namespace = normalizeNamespace(options.namespace);
   const log = (message: string, level: 'info' | 'error' = 'info') => {
     if (typeof logCallback === 'function') {
       logCallback(message, level);
@@ -114,12 +115,12 @@ export async function indexDocumentation(
     getEmbeddingDimensions()
   );
 
-  const existingResource = await getResource(index, resourceId);
+  const existingResource = await getResource(index, resourceId, namespace);
   if (existingResource) {
     log(`Replacing existing resource for ${url}`);
     try {
-      await deleteResourceFromPinecone(index, resourceId);
-      await deleteResource(index, resourceId);
+      await deleteResourceFromPinecone(index, resourceId, namespace);
+      await deleteResource(index, resourceId, namespace);
       log(`Removed previous resource data for ${url}`);
     } catch (cleanupError) {
       const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
@@ -137,8 +138,8 @@ export async function indexDocumentation(
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
-  
-  await addResource(index, resource);
+
+  await addResource(index, resource, namespace);
   log(`Started indexing for ${url}`);
   
   try {
@@ -177,7 +178,7 @@ export async function indexDocumentation(
     }
 
     resource.totalChunks = totalChunks;
-    await updateResource(index, resourceId, { totalChunks });
+    await updateResource(index, resourceId, { totalChunks }, namespace);
 
     // Index per page to emit granular logs
     let processed = 0;
@@ -187,19 +188,19 @@ export async function indexDocumentation(
       const pageSlices = await splitTextToTokenLimit(openaiKey, page.content, 8192);
       if (pageSlices.length > 0) {
         const pageVec = await generateEmbeddings(openaiKey, [pageSlices[0]]);
-        await upsertVectors(index, [{
-          id: `${resourceId}:${page.url}:page`,
-          values: pageVec[0],
-          metadata: {
-            type: 'doc',
-            level: 'page',
-            resourceId,
-            resourceName,
-            url: page.url,
-            content: pageSlices[0],
-            indexed: Date.now(),
-          },
-        }]);
+      await upsertVectors(index, [{
+        id: `${resourceId}:${page.url}:page`,
+        values: pageVec[0],
+        metadata: {
+          type: 'doc',
+          level: 'page',
+          resourceId,
+          resourceName,
+          url: page.url,
+          content: pageSlices[0],
+          indexed: Date.now(),
+        },
+      }], namespace);
       }
       // Token-aware sub-splitting per chunk to stay under model limit
       const tokenSafeTexts: string[] = [];
@@ -220,14 +221,14 @@ export async function indexDocumentation(
           indexed: Date.now(),
         },
       }));
-      await upsertVectors(index, vectors);
+      await upsertVectors(index, vectors, namespace);
       processed += tokenSafeTexts.length;
-      await updateResource(index, resourceId, { chunksProcessed: processed, updatedAt: Date.now() });
+      await updateResource(index, resourceId, { chunksProcessed: processed, updatedAt: Date.now() }, namespace);
       log(`Indexed: ${page.url} (${tokenSafeTexts.length} chunks)`);
       if (progressCallback) progressCallback({ current: processed, total: totalChunks });
     }
 
-    await updateResource(index, resourceId, { status: 'ready', updatedAt: Date.now() });
+    await updateResource(index, resourceId, { status: 'ready', updatedAt: Date.now() }, namespace);
     log(`Completed indexing for ${url}`);
     return resourceId;
   } catch (error) {
@@ -236,7 +237,7 @@ export async function indexDocumentation(
       status: 'error',
       error: error instanceof Error ? error.message : String(error),
       updatedAt: Date.now(),
-    });
+    }, namespace);
     throw error;
   }
 }

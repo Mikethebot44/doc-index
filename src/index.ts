@@ -18,7 +18,7 @@ import {
 } from './types';
 import { indexDocumentation, searchFirecrawlUrls } from './firecrawl';
 import { searchDocumentation, searchDocumentationGrouped } from './search';
-import { getOrCreateIndex } from './pinecone';
+import { getOrCreateIndex, normalizeNamespace } from './pinecone';
 import { getEmbeddingDimensions, splitTextToTokenLimit } from './openai';
 import {
   listJobs as loadJobs,
@@ -85,6 +85,9 @@ function sanitizeIndexOptions(options: IndexDocumentationOptions = {}): IndexDoc
   if (Array.isArray(options.excludePaths)) {
     sanitized.excludePaths = [...options.excludePaths];
   }
+  if (typeof options.namespace === 'string') {
+    sanitized.namespace = options.namespace;
+  }
   return sanitized;
 }
 
@@ -93,22 +96,42 @@ export class DocIndexSDK {
   private pineconeKey: string;
   private indexName: string;
   private firecrawlKey: string | undefined;
+  private defaultNamespace: string;
 
   constructor(config: DocIndexConfig) {
     this.openaiKey = config.openaiKey;
     this.pineconeKey = config.pineconeKey;
     this.indexName = config.pineconeIndexName || 'doc-index';
     this.firecrawlKey = config.firecrawlKey;
+    this.defaultNamespace = normalizeNamespace(config.pineconeNamespace);
+  }
+
+  private resolveNamespace(namespace?: string): string {
+    if (typeof namespace === 'string') {
+      return normalizeNamespace(namespace);
+    }
+    return this.defaultNamespace;
+  }
+
+  private async getIndexContext(namespace?: string): Promise<{ index: any; namespace: string }> {
+    const resolvedNamespace = this.resolveNamespace(namespace);
+    const index = await getOrCreateIndex(
+      this.pineconeKey,
+      this.indexName,
+      getEmbeddingDimensions()
+    );
+    return { index, namespace: resolvedNamespace };
   }
 
   async summarizeDocumentation(
     query: string,
-    options: { topPages?: number; model?: string } = {}
+    options: { topPages?: number; model?: string; namespace?: string } = {}
   ): Promise<string> {
     const topPages = options.topPages ?? 3;
     const modelName = options.model ?? 'gpt-5-mini';
+    const namespace = this.resolveNamespace(options.namespace);
 
-    const pages = await this.searchDocumentationGrouped(query, { returnPage: true });
+    const pages = await this.searchDocumentationGrouped(query, { returnPage: true, namespace });
     const top = (pages as any[]).slice(0, topPages);
     if (!top || top.length === 0) {
       throw new Error('No matching documents found to summarize');
@@ -147,12 +170,29 @@ export class DocIndexSDK {
     question: string,
     options: AskAgentOptions = {}
   ): Promise<string> {
+    const namespace = this.resolveNamespace(options.namespace);
+    const agentOptions: AskAgentOptions = { ...options, namespace };
     const { runDocIndexAgent } = await import('./agent');
+    if (namespace !== this.defaultNamespace) {
+      const scopedSdk = new DocIndexSDK({
+        openaiKey: this.openaiKey,
+        pineconeKey: this.pineconeKey,
+        pineconeIndexName: this.indexName,
+        firecrawlKey: this.firecrawlKey,
+        pineconeNamespace: namespace,
+      });
+      return await runDocIndexAgent({
+        sdk: scopedSdk,
+        question,
+        openaiKey: this.openaiKey,
+        options: agentOptions,
+      });
+    }
     return await runDocIndexAgent({
       sdk: this,
       question,
       openaiKey: this.openaiKey,
-      options,
+      options: agentOptions,
     });
   }
 
@@ -165,18 +205,21 @@ export class DocIndexSDK {
     if (!this.firecrawlKey) {
       throw new Error('Firecrawl API key is required for indexing documentation');
     }
-    
+
+    const namespace = this.resolveNamespace(options.namespace);
+    const requestOptions: IndexDocumentationOptions = { ...options, namespace };
+
     const wrappedProgress = onProgress ? (progress: { current: number; total: number }) => {
       onProgress(progress.current, progress.total);
     } : undefined;
-    
+
     return await indexDocumentation(
       this.openaiKey,
       this.pineconeKey,
       this.firecrawlKey,
       this.indexName,
       url,
-      options,
+      requestOptions,
       wrappedProgress,
       onLog
     );
@@ -190,9 +233,11 @@ export class DocIndexSDK {
       throw new Error('Firecrawl API key is required for indexing documentation');
     }
 
+    const namespace = this.resolveNamespace(options.namespace);
+    const requestOptions: IndexDocumentationOptions = { ...options, namespace };
     const jobId = generateJobId();
     const resourceId = `doc:${url}`;
-    const sanitizedOptions = sanitizeIndexOptions(options);
+    const sanitizedOptions = sanitizeIndexOptions(requestOptions);
     const now = Date.now();
 
     const job: IndexJob = {
@@ -238,6 +283,7 @@ export class DocIndexSDK {
       openaiKey: this.openaiKey,
       pineconeKey: this.pineconeKey,
       pineconeIndexName: this.indexName,
+      pineconeNamespace: this.defaultNamespace,
       firecrawlKey: this.firecrawlKey,
     });
 
@@ -279,13 +325,15 @@ export class DocIndexSDK {
     sources?: string[],
     options: SearchOptions = {}
   ): Promise<SearchResult[]> {
+    const namespace = this.resolveNamespace(options.namespace);
+    const searchOptions: SearchOptions = { ...options, namespace };
     return await searchDocumentation(
       this.openaiKey,
       this.pineconeKey,
       this.indexName,
       query,
       sources,
-      options
+      searchOptions
     );
   }
 
@@ -293,12 +341,13 @@ export class DocIndexSDK {
     query: string,
     options: SearchOptions & { returnPage?: boolean; perPageLimit?: number } = {}
   ) {
+    const namespace = this.resolveNamespace(options.namespace);
     return await searchDocumentationGrouped(
       this.openaiKey,
       this.pineconeKey,
       this.indexName,
       query,
-      options
+      { ...options, namespace }
     );
   }
 
@@ -413,47 +462,36 @@ export class DocIndexSDK {
     };
   }
 
-  async listResources(): Promise<Resource[]> {
-    const index = await getOrCreateIndex(
-      this.pineconeKey,
-      this.indexName,
-      getEmbeddingDimensions()
-    );
+  async listResources(namespaceOverride?: string): Promise<Resource[]> {
+    const { index, namespace } = await this.getIndexContext(namespaceOverride);
     const { getResources: getResourcesFromIndex } = await import('./resource-manager');
-    return await getResourcesFromIndex(index);
+    return await getResourcesFromIndex(index, namespace);
   }
 
-  async getResource(resourceId: string): Promise<Resource | undefined> {
-    const index = await getOrCreateIndex(
-      this.pineconeKey,
-      this.indexName,
-      getEmbeddingDimensions()
-    );
+  async getResource(resourceId: string, namespaceOverride?: string): Promise<Resource | undefined> {
+    const { index, namespace } = await this.getIndexContext(namespaceOverride);
     const { getResource: getResourceFromIndex } = await import('./resource-manager');
-    return await getResourceFromIndex(index, resourceId);
+    return await getResourceFromIndex(index, resourceId, namespace);
   }
 
-  async checkResourceStatus(resourceId: string): Promise<Resource | undefined> {
-    return await this.getResource(resourceId);
+  async checkResourceStatus(resourceId: string, namespace?: string): Promise<Resource | undefined> {
+    return await this.getResource(resourceId, namespace);
   }
 
   async renameResource(resourceId: string, newName: string): Promise<void> {
-    const index = await getOrCreateIndex(
-      this.pineconeKey,
-      this.indexName,
-      getEmbeddingDimensions()
-    );
+    const { index, namespace } = await this.getIndexContext();
     const { updateResource: updateResourceMetadata } = await import('./resource-manager');
-    await updateResourceMetadata(index, resourceId, { name: newName });
-    
+    await updateResourceMetadata(index, resourceId, { name: newName }, namespace);
+
     const { queryVectors, upsertVectors } = await import('./pinecone');
     const matches = await queryVectors(
       index,
       Array(3072).fill(0),
       10000,
-      { resourceId: { $eq: resourceId } }
+      { resourceId: { $eq: resourceId } },
+      namespace
     );
-    
+
     const updates = matches.map(match => ({
       id: match.id as string,
       values: match.values as number[],
@@ -462,19 +500,15 @@ export class DocIndexSDK {
         resourceName: newName,
       } as any,
     }));
-    
-    await upsertVectors(index, updates);
+
+    await upsertVectors(index, updates, namespace);
   }
 
   async deleteResource(resourceId: string): Promise<void> {
-    const index = await getOrCreateIndex(
-      this.pineconeKey,
-      this.indexName,
-      getEmbeddingDimensions()
-    );
+    const { index, namespace } = await this.getIndexContext();
     const { deleteResource: deleteResourceMetadata, deleteResourceFromPinecone: deleteVectorsFromPinecone } = await import('./resource-manager');
-    await deleteResourceMetadata(index, resourceId);
-    await deleteVectorsFromPinecone(index, resourceId);
+    await deleteResourceMetadata(index, resourceId, namespace);
+    await deleteVectorsFromPinecone(index, resourceId, namespace);
   }
 }
 

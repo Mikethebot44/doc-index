@@ -12,6 +12,11 @@ export function getPineconeClient(pineconeKey: string): Pinecone {
   return pineconeClient;
 }
 
+export function normalizeNamespace(namespace?: string): string {
+  const trimmed = typeof namespace === 'string' ? namespace.trim() : '';
+  return trimmed.length > 0 ? trimmed : '__default__';
+}
+
 export async function getOrCreateIndex(
   pineconeKey: string,
   indexName: string,
@@ -45,21 +50,49 @@ export async function getOrCreateIndex(
 
 export async function upsertVectors(
   index: any,
-  vectors: VectorRecord[]
+  vectors: VectorRecord[],
+  namespace?: string
 ): Promise<void> {
   try {
     const BATCH_SIZE = 100;
-    
+    const normalizedNamespace = normalizeNamespace(namespace);
+
     for (let i = 0; i < vectors.length; i += BATCH_SIZE) {
       const batch = vectors.slice(i, i + BATCH_SIZE);
-      
+
       await retry(
         async () => {
-          await index.upsert(batch.map(v => ({
+          const payload = batch.map(v => ({
             id: v.id,
             values: v.values,
             metadata: v.metadata,
-          })));
+          }));
+
+          const namespaced = typeof index.namespace === 'function'
+            ? index.namespace(normalizedNamespace)
+            : undefined;
+
+          if (namespaced && typeof namespaced.upsert === 'function') {
+            await namespaced.upsert(payload);
+            return;
+          }
+
+          if (typeof index.upsert !== 'function') {
+            throw new Error('Pinecone index does not support upsert operations');
+          }
+
+          try {
+            await index.upsert({
+              namespace: normalizedNamespace,
+              vectors: payload,
+            });
+          } catch (error) {
+            try {
+              await index.upsert(payload, normalizedNamespace);
+            } catch {
+              throw error;
+            }
+          }
         }
       );
     }
@@ -70,12 +103,38 @@ export async function upsertVectors(
 
 export async function deleteVectorsByFilter(
   index: any,
-  filter: Record<string, any>
+  filter: Record<string, any>,
+  namespace?: string
 ): Promise<void> {
   try {
+    const normalizedNamespace = normalizeNamespace(namespace);
     await retry(
       async () => {
-        await index.deleteMany(filter);
+        const namespaced = typeof index.namespace === 'function'
+          ? index.namespace(normalizedNamespace)
+          : undefined;
+
+        if (namespaced && typeof namespaced.deleteMany === 'function') {
+          await namespaced.deleteMany(filter);
+          return;
+        }
+
+        if (typeof index.deleteMany !== 'function') {
+          throw new Error('Pinecone index does not support deleteMany operations');
+        }
+
+        try {
+          await index.deleteMany({
+            namespace: normalizedNamespace,
+            filter,
+          });
+        } catch (error) {
+          try {
+            await index.deleteMany(filter, normalizedNamespace);
+          } catch {
+            throw error;
+          }
+        }
       }
     );
   } catch (error) {
@@ -87,20 +146,49 @@ export async function queryVectors(
   index: any,
   queryVector: number[],
   topK: number,
-  filter?: Record<string, any>
+  filter?: Record<string, any>,
+  namespace?: string
 ): Promise<any[]> {
   try {
+    const normalizedNamespace = normalizeNamespace(namespace);
+    const namespaced = typeof index.namespace === 'function'
+      ? index.namespace(normalizedNamespace)
+      : undefined;
+
     const result = await retry(
       async () => {
-        return await index.query({
-          vector: queryVector,
-          topK,
-          includeMetadata: true,
-          filter,
-        });
+        if (namespaced && typeof namespaced.query === 'function') {
+          return await namespaced.query({
+            vector: queryVector,
+            topK,
+            includeMetadata: true,
+            filter,
+          });
+        }
+
+        if (typeof index.query !== 'function') {
+          throw new Error('Pinecone index does not support query operations');
+        }
+
+        try {
+          return await index.query({
+            vector: queryVector,
+            topK,
+            includeMetadata: true,
+            filter,
+            namespace: normalizedNamespace,
+          });
+        } catch (error) {
+          return await index.query({
+            vector: queryVector,
+            topK,
+            includeMetadata: true,
+            filter,
+          }, normalizedNamespace);
+        }
       }
     );
-    
+
     return result.matches || [];
   } catch (error) {
     handleError(error, 'Failed to query vectors');

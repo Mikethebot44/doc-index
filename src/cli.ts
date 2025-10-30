@@ -166,13 +166,17 @@ program
   .option('-i, --include <paths...>', 'Include only paths (substring match)', [])
   .option('-e, --exclude <paths...>', 'Exclude paths (substring match)', [])
   .option('-b, --background', 'Run indexing in the background', false)
+  .option('-n, --namespace <name>', 'Pinecone namespace to target', '__default__')
   .action(async (url, promptArg, options) => {
     const config = getConfig();
-    const sdk = new DocIndexSDK(config);
-    
+    const namespace = typeof options.namespace === 'string' && options.namespace.trim().length > 0
+      ? options.namespace
+      : config.pineconeNamespace ?? '__default__';
+    const sdk = new DocIndexSDK({ ...config, pineconeNamespace: namespace });
+
     console.log(`Indexing documentation: ${url}`);
     console.log('');
-    
+
     try {
       const parsedLimit = Number.parseInt(options.maxPages, 10);
       const maxPages = Number.isFinite(parsedLimit) ? parsedLimit : undefined;
@@ -183,6 +187,7 @@ program
         prompt: options.prompt ?? promptArg,
         includePaths: include.length > 0 ? include : undefined,
         excludePaths: exclude.length > 0 ? exclude : undefined,
+        namespace,
       };
 
       if (options.background) {
@@ -241,10 +246,14 @@ program
   .option('-l, --limit <limit>', 'Maximum number of results', '10')
   .option('--grouped', 'Group results by page URL', false)
   .option('--return-page', 'Return assembled page markdown', false)
+  .option('-n, --namespace <name>', 'Pinecone namespace to target', '__default__')
   .action(async (query, options) => {
     const config = getConfig();
-    const sdk = new DocIndexSDK(config);
-    
+    const namespace = typeof options.namespace === 'string' && options.namespace.trim().length > 0
+      ? options.namespace
+      : config.pineconeNamespace ?? '__default__';
+    const sdk = new DocIndexSDK({ ...config, pineconeNamespace: namespace });
+
     console.log(`Searching: "${query}"`);
     console.log('');
     
@@ -261,6 +270,7 @@ program
         const grouped = await sdk.searchDocumentationGrouped(query, {
           limit: parseInt(options.limit),
           returnPage: Boolean(options.returnPage),
+          namespace,
         });
         stopSpinner();
         if (options.returnPage) {
@@ -282,7 +292,7 @@ program
         const results = await sdk.searchDocumentation(
           query,
           options.sources.length > 0 ? options.sources : undefined,
-          { limit: parseInt(options.limit) }
+          { limit: parseInt(options.limit), namespace }
         );
         stopSpinner();
         console.log(`Found ${results.length} results:`);
@@ -371,9 +381,13 @@ program
   .argument('<query>', 'Query to summarize against')
   .option('--top <n>', 'Number of top pages', '3')
   .option('--model <model>', 'LLM model to use', 'gpt-5-mini')
+  .option('-n, --namespace <name>', 'Pinecone namespace to target', '__default__')
   .action(async (query, options) => {
     const config = getConfig();
-    const sdk = new DocIndexSDK(config);
+    const namespace = typeof options.namespace === 'string' && options.namespace.trim().length > 0
+      ? options.namespace
+      : config.pineconeNamespace ?? '__default__';
+    const sdk = new DocIndexSDK({ ...config, pineconeNamespace: namespace });
     console.log(`Summarizing top ${options.top} pages with model: ${options.model}`);
     const stopIndicatorInternal = startLoading(SUMMARIZE_LOADING_MESSAGES);
     let spinnerActive = true;
@@ -386,6 +400,7 @@ program
       const summary = await sdk.summarizeDocumentation(query, {
         topPages: parseInt(options.top),
         model: options.model,
+        namespace,
       });
       stopSpinner();
       console.log(summary);
@@ -404,9 +419,13 @@ program
   .option('--steps <count>', 'Maximum number of tool round-trips', '4')
   .option('--temperature <value>', 'Sampling temperature for the model', '0.2')
   .option('--include-resources', 'Include the indexed resource list as agent context', false)
+  .option('-n, --namespace <name>', 'Pinecone namespace to target', '__default__')
   .action(async (questionWords: string[], options) => {
     const config = getConfig();
-    const sdk = new DocIndexSDK(config);
+    const namespace = typeof options.namespace === 'string' && options.namespace.trim().length > 0
+      ? options.namespace
+      : config.pineconeNamespace ?? '__default__';
+    const sdk = new DocIndexSDK({ ...config, pineconeNamespace: namespace });
 
     const question = Array.isArray(questionWords) ? questionWords.join(' ') : String(questionWords);
     const steps = Number.parseInt(options.steps, 10);
@@ -429,6 +448,7 @@ program
         maxToolRoundtrips: Number.isFinite(steps) ? steps : undefined,
         temperature: Number.isFinite(temperature) ? temperature : undefined,
         includeResourceList: Boolean(options.includeResources),
+        namespace,
         onToken: chunk => {
           if (!chunk) return;
           if (!sawStreamChunk) {
@@ -457,13 +477,17 @@ program
 program
   .command('list')
   .description('List all indexed resources')
-  .action(async () => {
+  .option('-n, --namespace <name>', 'Pinecone namespace to target', '__default__')
+  .action(async (options) => {
     const config = getConfig();
-    const sdk = new DocIndexSDK(config);
-    
+    const namespace = typeof options.namespace === 'string' && options.namespace.trim().length > 0
+      ? options.namespace
+      : config.pineconeNamespace ?? '__default__';
+    const sdk = new DocIndexSDK({ ...config, pineconeNamespace: namespace });
+
     try {
-      const resources = await sdk.listResources();
-      
+      const resources = await sdk.listResources(namespace);
+
       if (resources.length === 0) {
         console.log('No indexed resources found.');
         return;
@@ -517,7 +541,10 @@ program
         if (job.resourceId) {
           console.log(`Resource ID: ${job.resourceId}`);
           try {
-            const resource = await sdk.checkResourceStatus(job.resourceId);
+            const resourceNamespace = typeof job.options?.namespace === 'string'
+              ? job.options.namespace
+              : undefined;
+            const resource = await sdk.checkResourceStatus(job.resourceId, resourceNamespace);
             if (resource) {
               console.log('');
               console.log('Latest resource state:');
@@ -606,7 +633,8 @@ function getConfig(): DocIndexConfig {
   const openaiKey = process.env.OPENAI_API_KEY;
   const pineconeKey = process.env.PINECONE_API_KEY;
   const firecrawlKey = process.env.FIRECRAWL_API_KEY;
-  
+  const pineconeNamespace = process.env.PINECONE_NAMESPACE || process.env.DOC_INDEX_NAMESPACE;
+
   if (!openaiKey) {
     throw new Error('OPENAI_API_KEY environment variable is required');
   }
@@ -619,6 +647,7 @@ function getConfig(): DocIndexConfig {
     openaiKey,
     pineconeKey,
     firecrawlKey,
+    pineconeNamespace,
   };
 }
 
