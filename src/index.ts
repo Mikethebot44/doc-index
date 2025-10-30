@@ -13,6 +13,8 @@ import {
   FindDocsResult,
   AskAgentOptions,
   IndexJob,
+  CreateNamespaceOptions,
+  CreateNamespaceResult,
 } from './types';
 import { indexDocumentation, searchFirecrawlUrls } from './firecrawl';
 import { searchDocumentation, searchDocumentationGrouped } from './search';
@@ -308,6 +310,107 @@ export class DocIndexSDK {
       throw new Error('Firecrawl API key is required for finding documents');
     }
     return await searchFirecrawlUrls(this.firecrawlKey, query, options);
+  }
+
+  async createNamespace(
+    name: string,
+    options: CreateNamespaceOptions = {}
+  ): Promise<CreateNamespaceResult> {
+    const normalized = typeof name === 'string' ? name.trim() : '';
+    if (!normalized) {
+      throw new Error('Namespace name is required');
+    }
+
+    const placeholderId = options.placeholderId?.trim() || `__namespace__:${normalized}`;
+    const dimensions = getEmbeddingDimensions();
+    const placeholderValues = Array(dimensions).fill(0);
+
+    const index = await getOrCreateIndex(
+      this.pineconeKey,
+      this.indexName,
+      dimensions
+    );
+
+    const namespaced =
+      typeof index.namespace === 'function' ? index.namespace(normalized) : undefined;
+    const target = namespaced ?? index;
+
+    let existed = false;
+    let existingMetadata: Record<string, unknown> | undefined;
+
+    if (typeof target.fetch === 'function') {
+      try {
+        const fetchRequest = namespaced
+          ? { ids: [placeholderId] }
+          : { ids: [placeholderId], namespace: normalized };
+        const response = await target.fetch(fetchRequest);
+        const fetched = response?.vectors?.[placeholderId];
+        if (fetched?.metadata && typeof fetched.metadata === 'object') {
+          existingMetadata = fetched.metadata as Record<string, unknown>;
+        }
+        if (fetched) {
+          existed = true;
+        }
+      } catch {
+        // Ignore fetch errors; we'll attempt creation regardless.
+      }
+    }
+
+    const metadata: Record<string, unknown> = {
+      type: '__namespace__',
+      namespace: normalized,
+    };
+
+    if (existingMetadata) {
+      Object.assign(metadata, existingMetadata);
+    }
+
+    if (options.metadata) {
+      Object.assign(metadata, options.metadata);
+    }
+
+    if (options.description) {
+      metadata.description = options.description;
+    }
+
+    metadata.type = '__namespace__';
+    metadata.namespace = normalized;
+
+    if (!('createdAt' in metadata)) {
+      metadata.createdAt = Date.now();
+    }
+
+    const vectorPayload = {
+      id: placeholderId,
+      values: placeholderValues,
+      metadata,
+    };
+
+    if (namespaced && typeof namespaced.upsert === 'function') {
+      await namespaced.upsert([vectorPayload]);
+    } else if (typeof target.upsert === 'function') {
+      try {
+        await target.upsert({
+          namespace: normalized,
+          vectors: [vectorPayload],
+        });
+      } catch (error) {
+        try {
+          await target.upsert([vectorPayload], normalized);
+        } catch {
+          throw error;
+        }
+      }
+    } else {
+      throw new Error('Pinecone client does not support namespace creation');
+    }
+
+    return {
+      name: normalized,
+      placeholderId,
+      created: !existed,
+      metadata,
+    };
   }
 
   async listResources(): Promise<Resource[]> {

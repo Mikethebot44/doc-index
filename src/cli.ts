@@ -93,6 +93,70 @@ program
   .version('1.0.0');
 
 program
+  .command('create-namespace')
+  .description('Create a new Pinecone namespace for the configured index')
+  .argument('<name>', 'Namespace name to create')
+  .option('-d, --description <description>', 'Description metadata to associate with the namespace')
+  .option('-m, --metadata <json>', 'Additional metadata JSON to store with the namespace placeholder')
+  .option('-p, --placeholder-id <id>', 'Custom placeholder vector identifier')
+  .action(async (namespaceName, options) => {
+    const config = getConfig();
+    const sdk = new DocIndexSDK(config);
+
+    let parsedMetadata: Record<string, unknown> | undefined;
+    if (options.metadata) {
+      try {
+        const raw = JSON.parse(options.metadata);
+        if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+          parsedMetadata = raw as Record<string, unknown>;
+        } else {
+          throw new Error('Metadata JSON must describe an object');
+        }
+      } catch (error) {
+        console.error('Invalid metadata JSON provided. Ensure it is a valid JSON object.');
+        if (error instanceof Error) {
+          console.error(error.message);
+        }
+        process.exit(1);
+      }
+    }
+
+    try {
+      const result = await sdk.createNamespace(namespaceName, {
+        description: options.description,
+        placeholderId: options.placeholderId,
+        metadata: parsedMetadata,
+      });
+
+      console.log(result.created ? `Namespace created: ${result.name}` : `Namespace already existed: ${result.name}`);
+      console.log(`Placeholder vector ID: ${result.placeholderId}`);
+
+      const metadataEntries = Object.entries(result.metadata ?? {});
+      if (metadataEntries.length > 0) {
+        console.log('Metadata:');
+        metadataEntries.forEach(([key, value]) => {
+          let rendered: string;
+          if (key === 'createdAt' && typeof value === 'number') {
+            rendered = new Date(value).toISOString();
+          } else if (typeof value === 'object' && value !== null) {
+            try {
+              rendered = JSON.stringify(value);
+            } catch {
+              rendered = String(value);
+            }
+          } else {
+            rendered = String(value);
+          }
+          console.log(`  ${key}: ${rendered}`);
+        });
+      }
+    } catch (error) {
+      console.error('Failed to create namespace:', error);
+      process.exit(1);
+    }
+  });
+
+program
   .command('index-docs')
   .description('Index documentation from a URL')
   .argument('<url>', 'Documentation URL')

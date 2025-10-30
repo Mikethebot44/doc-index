@@ -41,6 +41,19 @@ export interface DocIndexConfig {
   firecrawlKey?: string;
 }
 
+export interface CreateNamespaceOptions {
+  description?: string;
+  placeholderId?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface CreateNamespaceResult {
+  name: string;
+  placeholderId: string;
+  created: boolean;
+  metadata: Record<string, unknown>;
+}
+
 export interface IndexDocumentationOptions {
   maxPages?: number;
   prompt?: string;
