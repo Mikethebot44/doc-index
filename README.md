@@ -85,6 +85,8 @@ Options:
 - `--grouped` – return grouped matches by page URL
 - `--return-page` – include reconstructed page markdown alongside grouped results
 
+By default, search results are reranked using Pinecone’s hosted Cohere Rerank 3.5 model for higher precision. The CLI uses defaults; you can customize reranking via the SDK.
+
 ### Summarize Documentation
 
 ```bash
@@ -189,7 +191,13 @@ Additional helpers:
 const searchResults = await sdk.searchDocumentation(
   'how to configure the API endpoint',
   ['doc:https://docs.example.com'],
-  { limit: 5 },
+  {
+    limit: 5,
+    // Reranking options (optional; defaults shown)
+    rerankEnabled: true,
+    rerankModel: 'cohere-rerank-3.5',
+    rerankTopN: 5,
+  },
 );
 
 const grouped = await sdk.searchDocumentationGrouped('webhooks', {
@@ -236,7 +244,7 @@ await sdk.deleteResource('doc:https://docs.example.com');
 ## Architecture
 
 - **OpenAI**: Generates text embeddings using `text-embedding-3-large`
-- **Pinecone**: Stores and queries vectors with cosine similarity
+- **Pinecone**: Stores and queries vectors with cosine similarity; optionally reranks candidates via hosted models (Cohere Rerank 3.5)
 - **Firecrawl**: Crawls and scrapes documentation pages
 
 ### Chunking Strategy

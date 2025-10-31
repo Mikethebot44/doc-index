@@ -107,3 +107,70 @@ export async function queryVectors(
   }
 }
 
+export async function rerankMatches(
+  pineconeKey: string,
+  query: string,
+  matches: Array<{ id: string; score?: number; metadata?: VectorMetadata }>,
+  options?: { model?: string; topN?: number }
+): Promise<Array<{ id: string; score: number; metadata?: VectorMetadata }>> {
+  try {
+    const pc = getPineconeClient(pineconeKey);
+    const model = options?.model || 'cohere-rerank-3.5';
+
+    // Prepare documents for reranking: use chunk content from metadata
+    const documents = matches.map((m, idx) => ({
+      id: m.id || String(idx),
+      // Pinecone inference.rerank accepts arbitrary fields; we select via rankFields
+      chunk_text: String((m.metadata as any)?.content || ''),
+    }));
+
+    const topN = Math.min(options?.topN ?? documents.length, documents.length);
+
+    // If there is nothing to rank or all contents are empty, return original order
+    const nonEmpty = documents.some(d => d.chunk_text && d.chunk_text.trim().length > 0);
+    if (!nonEmpty || documents.length === 0) {
+      return matches.map(m => ({ id: m.id, score: m.score ?? 0, metadata: m.metadata }));
+    }
+
+    const result = await pc.inference.rerank(
+      model,
+      query,
+      documents as any,
+      {
+        topN,
+        rankFields: ['chunk_text'],
+        returnDocuments: false,
+      }
+    );
+
+    // result.data: [{ index, score, document? }...]
+    const ranked = (result as any)?.data as Array<{ index: number; score: number }> | undefined;
+    if (!ranked || ranked.length === 0) {
+      return matches.map(m => ({ id: m.id, score: m.score ?? 0, metadata: m.metadata }));
+    }
+
+    // Map reranked order to original matches and fill in scores
+    const ordered: Array<{ id: string; score: number; metadata?: VectorMetadata }> = [];
+    for (const r of ranked) {
+      const m = matches[r.index];
+      if (!m) continue;
+      ordered.push({ id: m.id, score: r.score ?? 0, metadata: m.metadata });
+    }
+
+    // If topN < matches.length, append the rest in original order
+    if (ordered.length < matches.length) {
+      const seen = new Set(ordered.map(o => o.id));
+      for (const m of matches) {
+        if (!seen.has(m.id)) {
+          ordered.push({ id: m.id, score: m.score ?? 0, metadata: m.metadata });
+        }
+      }
+    }
+
+    return ordered;
+  } catch (error) {
+    // On rerank failure, do not block search—return original order
+    handleError(error, 'Failed to rerank matches');
+    return matches.map(m => ({ id: m.id, score: m.score ?? 0, metadata: m.metadata }));
+  }
+}

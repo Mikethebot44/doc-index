@@ -1,5 +1,5 @@
 import { generateEmbedding, getEmbeddingDimensions } from './openai';
-import { getOrCreateIndex, queryVectors } from './pinecone';
+import { getOrCreateIndex, queryVectors, rerankMatches } from './pinecone';
 import { getResources as getResourcesFromIndex } from './resource-manager';
 import { SearchResult, SearchOptions, Resource } from './types';
 
@@ -39,12 +39,28 @@ export async function searchDocumentation(
     options.limit || 10,
     Object.keys(filter).length > 0 ? filter : undefined
   );
-  
-  return matches.map(match => ({
+
+  // Optionally rerank using Pinecone hosted Cohere Rerank 3.5
+  let results = matches.map(match => ({
     id: match.id as string,
     score: match.score || 0,
     metadata: match.metadata as any,
   }));
+
+  const rerankEnabled = options.rerankEnabled !== false; // default true
+  if (rerankEnabled && results.length > 0) {
+    const rerankTopN = Math.min(options.rerankTopN ?? results.length, results.length);
+    const reranked = await rerankMatches(
+      pineconeKey,
+      query,
+      results,
+      { model: options.rerankModel || 'cohere-rerank-3.5', topN: rerankTopN }
+    );
+    // Sort by reranked score desc and then slice to requested limit
+    results = reranked.sort((a, b) => (b.score - a.score)).slice(0, options.limit || 10);
+  }
+
+  return results;
 }
 
 export async function searchDocumentationGrouped(

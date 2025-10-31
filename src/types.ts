@@ -82,6 +82,10 @@ export interface SearchOptions {
     resourceId?: string[];
     url?: string;
   };
+  // Reranking options (defaults enabled using Cohere 3.5)
+  rerankEnabled?: boolean;
+  rerankModel?: string; // e.g. 'cohere-rerank-3.5'
+  rerankTopN?: number; // default: min(limit, candidate count)
 }
 
 export interface FindDocsOptions {
