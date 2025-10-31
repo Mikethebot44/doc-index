@@ -30,6 +30,7 @@ Set the required environment variables before using the CLI or SDK:
 export OPENAI_API_KEY="your-openai-key"
 export PINECONE_API_KEY="your-pinecone-key"
 export FIRECRAWL_API_KEY="your-firecrawl-key"
+export GITHUB_TOKEN="your-github-token"   # required for GitHub repository indexing
 ```
 
 Optional environment variables:
@@ -37,6 +38,7 @@ Optional environment variables:
 - `PINECONE_INDEX_NAME` – override the default Pinecone index name (`doc-index`)
 - `PINECONE_NAMESPACE` (or legacy `DOC_INDEX_NAMESPACE`) – default namespace to scope CLI/SDK operations (`__default__` if omitted)
 - `DOC_INDEX_HOME` – customise where background job history is stored (defaults to `~/.doc-index/jobs.json`)
+- `DOC_INDEX_GITHUB_TOKEN` – alternative variable the CLI checks for a GitHub token if `GITHUB_TOKEN` is unset
 
 ## Working With Namespaces
 
@@ -105,6 +107,43 @@ Options:
 - `-n, --namespace <name>` – Pinecone namespace to target (default: `__default__`)
 
 Foreground runs stream progress updates (`Progress: <current>/<total> chunks indexed`) and Firecrawl logs in place. When `--background` is used the command exits immediately after queuing and prints the job ID and resource ID so you can monitor it later.
+
+### Index a GitHub Repository
+
+```bash
+doc-index index-repo https://github.com/firecrawl/firecrawl \
+  --branch canary \
+  --lang ts tsx \
+  --max-files 250 \
+  --namespace repos \
+  --enrich-metadata
+```
+
+The CLI fetches the repository via the GitHub API, extracts lightweight symbol metadata, embeds file- and snippet-level representations, and stores them in Pinecone under the namespace you provide. Key flags:
+
+- `-r, --branch <name>` – branch to index (default: `main`)
+- `--lang <languages...>` – restricts files by language/extension (for example `ts`, `tsx`, `py`)
+- `--max-files <count>` – hard cap on the number of files to embed (default: 1000)
+- `--max-file-size <kb>` – skip files larger than the given size in kilobytes (default: 100)
+- `--enrich-metadata` – invoke an LLM to infer semantic metadata before embedding
+- `-n, --namespace <name>` – Pinecone namespace for the vectors (default: `__default__`)
+
+Add `--background` to queue the job and let the detached worker process it. Track progress with `doc-index status <job-id>`. Combine with `--enrich-metadata` to capture semantic file summaries in the background.
+
+### Search Indexed Code
+
+```bash
+doc-index search-code "verify jwt token middleware" \
+  --repo vercel/next.js \
+  --namespace repos
+```
+
+The search command runs hierarchical retrieval: it queries both file-level vectors and snippet-level vectors, then merges and ranks the matches so you can jump straight to the most relevant symbol or file. Options:
+
+- `-r, --repo <owner/repo>` – limit to a specific repository slug
+- `--files <count>` – number of file-level matches to request (default: 8)
+- `--snippets <count>` – number of snippet-level matches to request (default: 16)
+- `-n, --namespace <name>` – namespace to search (default: `__default__`)
 
 ### Track Jobs and Resources
 
@@ -190,6 +229,7 @@ const sdk = new DocIndexSDK({
   firecrawlKey: process.env.FIRECRAWL_API_KEY!,
   pineconeIndexName: process.env.PINECONE_INDEX_NAME,
   pineconeNamespace: process.env.PINECONE_NAMESPACE,
+  githubToken: process.env.GITHUB_TOKEN || process.env.DOC_INDEX_GITHUB_TOKEN,
 });
 ```
 
@@ -306,6 +346,61 @@ await sdk.deleteResource('doc:https://docs.example.com', 'docs-team');
 ```
 
 > **Tip:** Mutating helpers (`renameResource`, `deleteResource`, `enqueueIndexDocumentation`, etc.) operate on the namespace configured on the SDK instance. Instantiate `new DocIndexSDK({ ..., pineconeNamespace: 'docs-team' })` or pass an explicit namespace argument when you need to target a different namespace.
+
+### Index a GitHub Repository
+
+```typescript
+const repoResult = await sdk.indexRepo(
+  'https://github.com/vercel/next.js',
+  {
+    branch: 'canary',
+    languages: ['ts', 'tsx'],
+    maxFiles: 250,
+    namespace: 'repos',
+    enrichMetadata: true,
+  },
+  (current, total) => {
+    console.log(`Progress: ${current}/${total}`);
+  }
+);
+
+console.log(repoResult.filesIndexed, 'files indexed');
+console.log(repoResult.snippetsIndexed, 'snippets indexed');
+console.log(repoResult.metadataEnriched, 'files enriched');
+```
+
+The SDK automatically cleans up any previous vectors for the repository namespace combination before uploading new embeddings. Provide `maxFileSizeKb` if you need to clamp large files (defaults to 100 KB).
+
+Queue the same work without blocking the current process:
+
+```typescript
+const job = await sdk.enqueueIndexRepo('vercel/next.js', {
+  branch: 'canary',
+  namespace: 'repos',
+  enrichMetadata: true,
+});
+
+console.log('Queued repo job:', job.id);
+```
+
+### Search an Indexed Codebase
+
+```typescript
+const codeResult = await sdk.searchCodebase('verify jwt token middleware', {
+  repo: 'vercel/next.js',
+  topFileResults: 8,
+  topSnippetResults: 16,
+  namespace: 'repos',
+});
+
+const [first] = codeResult.matches;
+if (first) {
+  console.log(`Top match (${first.granularity}):`, first.repo, first.path, first.symbol);
+  console.log('Preview:', first.preview);
+}
+```
+
+File-level and snippet-level matches are automatically merged and ranked. Inspect `codeResult.topMatch` for the highest-scoring candidate.
 
 ## Architecture
 

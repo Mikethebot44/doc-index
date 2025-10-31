@@ -3,7 +3,7 @@
 import { Command } from 'commander';
 import * as dotenv from 'dotenv';
 import { DocIndexSDK } from './index';
-import { DocIndexConfig } from './types';
+import { DocIndexConfig, IndexRepositoryOptions } from './types';
 
 dotenv.config();
 
@@ -165,7 +165,7 @@ program
   .option('-p, --prompt <prompt>', 'Specification prompt override')
   .option('-i, --include <paths...>', 'Include only paths (substring match)', [])
   .option('-e, --exclude <paths...>', 'Exclude paths (substring match)', [])
-  .option('-b, --background', 'Run indexing in the background', false)
+  .option('--background', 'Run indexing in the background', false)
   .option('-n, --namespace <name>', 'Pinecone namespace to target', '__default__')
   .action(async (url, promptArg, options) => {
     const config = getConfig();
@@ -234,6 +234,216 @@ program
       }
     } catch (error) {
       console.error('Failed to index documentation:', error);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('index-repo')
+  .description('Index a GitHub repository')
+  .argument('<repository>', 'GitHub repository URL or owner/repo slug')
+.option('-r, --branch <name>', 'Repository branch to index', 'main')
+.option('--lang <languages...>', 'Only include matching languages or extensions', [])
+  .option('--max-files <count>', 'Maximum number of files to index', '1000')
+  .option('--max-file-size <kb>', 'Maximum file size to index in kilobytes', '100')
+  .option('--enrich-metadata', 'Use an LLM to enrich file metadata before embedding', false)
+  .option('--background', 'Run indexing in the background', false)
+  .option('-n, --namespace <name>', 'Pinecone namespace to target', '__default__')
+  .action(async (repository, options) => {
+    const config = getConfig();
+    const namespace = typeof options.namespace === 'string' && options.namespace.trim().length > 0
+      ? options.namespace
+      : config.pineconeNamespace ?? '__default__';
+    const sdk = new DocIndexSDK({ ...config, pineconeNamespace: namespace });
+
+    const languages = Array.isArray(options.lang)
+      ? options.lang
+      : typeof options.lang === 'string'
+        ? [options.lang]
+        : [];
+    const parsedMaxFiles = Number.parseInt(options.maxFiles, 10);
+    const parsedMaxFileSize = Number.parseInt(options.maxFileSize, 10);
+
+    console.log(`Indexing repository: ${repository}`);
+    console.log(`Namespace: ${namespace}`);
+    console.log('');
+
+    if (options.background) {
+      try {
+        const job = await sdk.enqueueIndexRepo(repository, {
+          branch: typeof options.branch === 'string' ? options.branch : undefined,
+          languages: languages.length > 0 ? languages : undefined,
+          maxFiles: Number.isFinite(parsedMaxFiles) ? parsedMaxFiles : undefined,
+          maxFileSizeKb: Number.isFinite(parsedMaxFileSize) ? parsedMaxFileSize : undefined,
+          namespace,
+          enrichMetadata: Boolean(options.enrichMetadata),
+        });
+        console.log(`Queued background indexing job: ${job.id}`);
+        console.log(`Repository: ${job.repo ?? repository}`);
+        const repoOptions = job.options as IndexRepositoryOptions & { namespace?: string };
+        if (typeof repoOptions.branch === 'string') {
+          console.log(`Branch: ${repoOptions.branch}`);
+        }
+        console.log(`Namespace: ${namespace}`);
+        console.log(`Resource ID: ${job.resourceId}`);
+        if (repoOptions.enrichMetadata) {
+          console.log('Metadata enrichment: enabled');
+        }
+        setImmediate(() => process.exit(0));
+        return;
+      } catch (error) {
+        console.error('Failed to queue repository indexing job:', error);
+        process.exit(1);
+      }
+    }
+
+    const stopIndicatorInternal = startLoading(INDEX_LOADING_MESSAGES);
+    let spinnerActive = true;
+    const stopSpinner = () => {
+      if (!spinnerActive) return;
+      spinnerActive = false;
+      stopIndicatorInternal();
+    };
+
+    try {
+      const result = await sdk.indexRepo(
+        repository,
+        {
+          branch: typeof options.branch === 'string' ? options.branch : undefined,
+          languages: languages.length > 0 ? languages : undefined,
+          maxFiles: Number.isFinite(parsedMaxFiles) ? parsedMaxFiles : undefined,
+          maxFileSizeKb: Number.isFinite(parsedMaxFileSize) ? parsedMaxFileSize : undefined,
+          namespace,
+          enrichMetadata: Boolean(options.enrichMetadata),
+        },
+        (current, total) => {
+          stopSpinner();
+          const totalDisplay = total > 0 ? total : '?';
+          console.log(`Progress: ${current}/${totalDisplay} files processed`);
+        },
+        (message, level = 'info') => {
+          stopSpinner();
+          if (level === 'error') {
+            console.error(message);
+          } else {
+            console.log(message);
+          }
+        }
+      );
+      stopSpinner();
+      console.log(`[✓] Repository indexed: ${result.repo}@${result.branch}`);
+      console.log(`[✓] Indexed ${result.filesIndexed} files and ${result.snippetsIndexed} snippets`);
+      if (result.skippedFiles > 0) {
+        console.log(`[!] Skipped files: ${result.skippedFiles}`);
+      }
+      if (result.metadataEnriched > 0) {
+        console.log(`[✓] Enriched metadata for ${result.metadataEnriched} files`);
+      }
+      console.log(`Namespace: ${result.namespace}`);
+      console.log(`Resource ID: ${result.resourceId}`);
+    } catch (error) {
+      stopSpinner();
+      console.error('Failed to index repository:', error);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('search-code')
+  .description('Search indexed GitHub repositories')
+  .argument('<query>', 'Natural language code search query')
+  .option('-r, --repo <repo>', 'Limit search to a specific owner/repo slug')
+  .option('--files <count>', 'Number of file-level matches to sample', '8')
+  .option('--snippets <count>', 'Number of snippet-level matches to sample', '16')
+  .option('-n, --namespace <name>', 'Pinecone namespace to target', '__default__')
+  .action(async (query, options) => {
+    const config = getConfig();
+    const namespace = typeof options.namespace === 'string' && options.namespace.trim().length > 0
+      ? options.namespace
+      : config.pineconeNamespace ?? '__default__';
+    const sdk = new DocIndexSDK({ ...config, pineconeNamespace: namespace });
+
+    console.log(`Searching code for: "${query}"`);
+    console.log(`Namespace: ${namespace}`);
+    if (options.repo) {
+      console.log(`Repository filter: ${options.repo}`);
+    }
+    console.log('');
+
+    const stopIndicatorInternal = startLoading(SEARCH_LOADING_MESSAGES);
+    let spinnerActive = true;
+    const stopSpinner = () => {
+      if (!spinnerActive) return;
+      spinnerActive = false;
+      stopIndicatorInternal();
+    };
+
+    try {
+      const topFileResults = Number.parseInt(options.files, 10);
+      const topSnippetResults = Number.parseInt(options.snippets, 10);
+      const result = await sdk.searchCodebase(query, {
+        namespace,
+        repo: typeof options.repo === 'string' ? options.repo : undefined,
+        topFileResults: Number.isFinite(topFileResults) ? topFileResults : undefined,
+        topSnippetResults: Number.isFinite(topSnippetResults) ? topSnippetResults : undefined,
+      });
+      stopSpinner();
+
+      if (!result.matches.length) {
+        console.log('No matching code found.');
+        return;
+      }
+
+      const top = result.topMatch;
+      if (top) {
+        console.log(`Top match [${top.granularity}] ${top.repo}/${top.path}`);
+        if (top.symbol) {
+          console.log(`  Symbol: ${top.symbol}`);
+        }
+        if (top.primaryPurpose) {
+          console.log(`  Purpose: ${top.primaryPurpose}`);
+        }
+        if (top.architectureRole) {
+          console.log(`  Role: ${top.architectureRole}`);
+        }
+        if (top.complexity) {
+          console.log(`  Complexity: ${top.complexity}`);
+        }
+        if (typeof top.score === 'number') {
+          console.log(`  Score: ${top.score.toFixed(3)}`);
+        }
+        if (top.url) {
+          console.log(`  URL: ${top.url}`);
+        }
+        console.log('');
+      }
+
+      const displayCount = Math.min(result.matches.length, 10);
+      console.log(`Matches (${displayCount}/${result.matches.length}):`);
+      result.matches.slice(0, displayCount).forEach((match, index) => {
+        console.log(`${index + 1}. [${match.granularity}] ${match.repo}/${match.path}`);
+        if (match.symbol) {
+          console.log(`   Symbol: ${match.symbol}`);
+        }
+        if (match.primaryPurpose) {
+          console.log(`   Purpose: ${match.primaryPurpose}`);
+        }
+        if (match.architectureRole) {
+          console.log(`   Role: ${match.architectureRole}`);
+        }
+        if (match.complexity) {
+          console.log(`   Complexity: ${match.complexity}`);
+        }
+        console.log(`   Score: ${match.score.toFixed(3)}`);
+        if (match.url) {
+          console.log(`   URL: ${match.url}`);
+        }
+        console.log(`   Preview: ${match.preview.replace(/\s+/g, ' ').slice(0, 180)}...`);
+        console.log('');
+      });
+    } catch (error) {
+      stopSpinner();
+      console.error('Failed to search codebase:', error);
       process.exit(1);
     }
   });
@@ -502,6 +712,21 @@ program
         console.log(`Type: ${resource.type}`);
         console.log(`Status: ${resource.status}`);
         console.log(`Chunks: ${resource.chunksProcessed}/${resource.totalChunks}`);
+        if (resource.type === 'repo') {
+          const repoLabel = resource.repo ? `${resource.repo}${resource.branch ? `@${resource.branch}` : ''}` : undefined;
+          if (repoLabel) {
+            console.log(`Repo: ${repoLabel}`);
+          }
+          if (typeof resource.fileCount === 'number') {
+            console.log(`Files: ${resource.fileCount}`);
+          }
+          if (typeof resource.snippetCount === 'number') {
+            console.log(`Snippets: ${resource.snippetCount}`);
+          }
+          if (typeof resource.enrichedCount === 'number') {
+            console.log(`Metadata enriched: ${resource.enrichedCount}`);
+          }
+        }
         if (resource.error) {
           console.log(`Error: ${resource.error}`);
         }
@@ -525,7 +750,24 @@ program
       const job = await sdk.getIndexJob(identifier);
       if (job) {
         console.log(`Job ID: ${job.id}`);
-        console.log(`URL: ${job.url}`);
+        console.log(`Type: ${job.type}`);
+        if (job.type === 'repo') {
+          console.log(`Repository: ${job.repo ?? job.url ?? '(unknown)'}`);
+          const repoOptions = job.options as IndexRepositoryOptions & { namespace?: string };
+          const branch = typeof repoOptions.branch === 'string' ? repoOptions.branch : undefined;
+          if (branch) {
+            console.log(`Branch: ${branch}`);
+          }
+          if (repoOptions.enrichMetadata) {
+            console.log('Metadata enrichment: enabled');
+          }
+        } else {
+          console.log(`URL: ${job.url ?? '(unknown)'}`);
+        }
+        const jobNamespace = typeof job.options?.namespace === 'string' ? job.options.namespace : undefined;
+        if (jobNamespace) {
+          console.log(`Namespace: ${jobNamespace}`);
+        }
         console.log(`Status: ${job.status}`);
         console.log(`Progress: ${job.progress.current}/${job.progress.total}`);
         if (job.error) {
@@ -550,6 +792,21 @@ program
               console.log('Latest resource state:');
               console.log(`   Status: ${resource.status}`);
               console.log(`   Chunks: ${resource.chunksProcessed}/${resource.totalChunks}`);
+              if (resource.type === 'repo') {
+                const repoLabel = resource.repo ? `${resource.repo}${resource.branch ? `@${resource.branch}` : ''}` : undefined;
+                if (repoLabel) {
+                  console.log(`   Repo: ${repoLabel}`);
+                }
+                if (typeof resource.fileCount === 'number') {
+                  console.log(`   Files: ${resource.fileCount}`);
+                }
+                if (typeof resource.snippetCount === 'number') {
+                  console.log(`   Snippets: ${resource.snippetCount}`);
+                }
+                if (typeof resource.enrichedCount === 'number') {
+                  console.log(`   Metadata enriched: ${resource.enrichedCount}`);
+                }
+              }
               console.log(`   Updated: ${new Date(resource.updatedAt).toISOString()}`);
               if (resource.error) {
                 console.log(`   Error: ${resource.error}`);
@@ -642,6 +899,7 @@ function getConfig(): DocIndexConfig {
   const pineconeKey = process.env.PINECONE_API_KEY;
   const firecrawlKey = process.env.FIRECRAWL_API_KEY;
   const pineconeNamespace = process.env.PINECONE_NAMESPACE || process.env.DOC_INDEX_NAMESPACE;
+  const githubToken = process.env.GITHUB_TOKEN || process.env.DOC_INDEX_GITHUB_TOKEN;
 
   if (!openaiKey) {
     throw new Error('OPENAI_API_KEY environment variable is required');
@@ -656,6 +914,7 @@ function getConfig(): DocIndexConfig {
     pineconeKey,
     firecrawlKey,
     pineconeNamespace,
+    githubToken,
   };
 }
 

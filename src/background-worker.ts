@@ -1,6 +1,6 @@
 import { DocIndexSDK } from './index';
 import { getJob, updateJob, appendJobLog } from './job-store';
-import { DocIndexConfig, IndexJobProgress } from './types';
+import { DocIndexConfig, IndexJobProgress, IndexRepositoryOptions, IndexDocumentationOptions } from './types';
 
 function formatWorkerError(error: unknown): string {
   if (error instanceof Error) {
@@ -66,39 +66,79 @@ async function run(): Promise<void> {
     startedAt: Date.now(),
     error: undefined,
   });
-  await appendJobLog(jobId, `Background worker started for ${job.url}`);
+  const jobLabel = job.type === 'repo'
+    ? job.repo ?? job.url ?? 'repository'
+    : job.url ?? 'documentation task';
+  await appendJobLog(jobId, `Background worker started for ${jobLabel}`);
 
   const sdk = new DocIndexSDK(config);
   let lastProgress: IndexJobProgress = job.progress;
 
   try {
-    const resourceId = await sdk.indexDocumentation(
-      job.url,
-      job.options,
-      (current, total) => {
-        lastProgress = { current, total };
-        void updateJob(jobId, {
-          progress: lastProgress,
-        });
-      },
-      (message, level = 'info') => {
-        if (level === 'error') {
-          console.error(`[${jobId}] ${message}`);
-        } else {
-          console.log(`[${jobId}] ${message}`);
-        }
-        void appendJobLog(jobId, message, level);
-      }
-    );
+    const handleProgress = (current: number, total: number) => {
+      lastProgress = { current, total };
+      void updateJob(jobId, {
+        progress: lastProgress,
+        updatedAt: Date.now(),
+      });
+    };
 
-    await appendJobLog(jobId, `Background indexing completed for ${job.url}`);
-    await updateJob(jobId, {
-      status: 'completed',
-      completedAt: Date.now(),
-      resourceId,
-      progress: lastProgress,
-      error: undefined,
-    });
+    const handleLog = (message: string, level: 'info' | 'error' = 'info') => {
+      if (level === 'error') {
+        console.error(`[${jobId}] ${message}`);
+      } else {
+        console.log(`[${jobId}] ${message}`);
+      }
+      void appendJobLog(jobId, message, level);
+    };
+
+    if (job.type === 'repo') {
+      const repoTarget = job.url ?? job.repo;
+      if (!repoTarget) {
+        throw new Error('Repository target was not provided for background job');
+      }
+      const repoOptions = (job.options ?? {}) as IndexRepositoryOptions;
+      const result = await sdk.indexRepo(
+        repoTarget,
+        repoOptions,
+        handleProgress,
+        handleLog
+      );
+      lastProgress = {
+        current: result.filesIndexed,
+        total: result.filesIndexed,
+      };
+      await appendJobLog(jobId, `Background repository indexing completed for ${result.repo}@${result.branch}`);
+      await updateJob(jobId, {
+        status: 'completed',
+        completedAt: Date.now(),
+        resourceId: result.resourceId,
+        progress: lastProgress,
+        error: undefined,
+        repo: result.repo,
+      });
+    } else {
+      const docTarget = job.url;
+      if (!docTarget) {
+        throw new Error('URL target was not provided for documentation job');
+      }
+      const docOptions = (job.options ?? {}) as IndexDocumentationOptions;
+      const resourceId = await sdk.indexDocumentation(
+        docTarget,
+        docOptions,
+        handleProgress,
+        handleLog
+      );
+
+      await appendJobLog(jobId, `Background indexing completed for ${docTarget}`);
+      await updateJob(jobId, {
+        status: 'completed',
+        completedAt: Date.now(),
+        resourceId,
+        progress: lastProgress,
+        error: undefined,
+      });
+    }
   } catch (error) {
     const message = formatWorkerError(error);
     await appendJobLog(jobId, `Background indexing failed: ${message}`, 'error');

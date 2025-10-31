@@ -1,4 +1,5 @@
-export type VectorType = 'doc';
+export type VectorType = 'doc' | 'repo';
+export type RepoGranularity = 'file' | 'snippet';
 
 export interface VectorMetadata {
   type: VectorType;
@@ -8,6 +9,23 @@ export interface VectorMetadata {
   url?: string;
   level?: 'page' | 'chunk';
   indexed: number;
+  granularity?: RepoGranularity;
+  repo?: string;
+  branch?: string;
+  path?: string;
+  language?: string;
+  symbol?: string;
+  functions?: string[];
+  hash?: string;
+  imports?: string[];
+  exports?: string[];
+  semanticJson?: string;
+  primaryPurpose?: string;
+  architectureRole?: string;
+  dependsOn?: string[];
+  interactionType?: string[];
+  complexity?: 'low' | 'medium' | 'high' | 'unknown';
+  keyEntities?: string[];
 }
 
 export interface VectorRecord {
@@ -26,6 +44,11 @@ export interface Resource {
   createdAt: number;
   updatedAt: number;
   error?: string;
+  repo?: string;
+  branch?: string;
+  fileCount?: number;
+  snippetCount?: number;
+  enrichedCount?: number;
 }
 
 export interface SearchResult {
@@ -40,6 +63,7 @@ export interface DocIndexConfig {
   pineconeIndexName?: string;
   firecrawlKey?: string;
   pineconeNamespace?: string;
+  githubToken?: string;
 }
 
 export interface CreateNamespaceOptions {
@@ -76,11 +100,15 @@ export interface IndexJobLogEntry {
   message: string;
 }
 
+export type IndexJobType = 'docs' | 'repo';
+
 export interface IndexJob {
   id: string;
+  type: IndexJobType;
   resourceId: string;
-  url: string;
-  options: IndexDocumentationOptions;
+  url?: string;
+  repo?: string;
+  options: (IndexDocumentationOptions | IndexRepositoryOptions) & { namespace?: string };
   status: IndexJobStatus;
   progress: IndexJobProgress;
   createdAt: number;
@@ -124,6 +152,56 @@ export interface AskAgentOptions {
   namespace?: string;
 }
 
+export interface IndexRepositoryOptions {
+  branch?: string;
+  languages?: string[];
+  maxFiles?: number;
+  maxFileSizeKb?: number;
+  namespace?: string;
+  enrichMetadata?: boolean;
+}
+
+export interface IndexRepositoryResult {
+  repo: string;
+  branch: string;
+  namespace: string;
+  filesIndexed: number;
+  snippetsIndexed: number;
+  skippedFiles: number;
+  resourceId: string;
+  metadataEnriched: number;
+}
+
+export interface SearchCodebaseOptions {
+  namespace?: string;
+  repo?: string;
+  topFileResults?: number;
+  topSnippetResults?: number;
+}
+
+export interface RepoSearchMatch {
+  id: string;
+  granularity: RepoGranularity;
+  score: number;
+  path: string;
+  repo: string;
+  branch?: string;
+  language?: string;
+  symbol?: string;
+  url?: string;
+  preview: string;
+  primaryPurpose?: string;
+  architectureRole?: string;
+  complexity?: string;
+}
+
+export interface SearchCodebaseResult {
+  query: string;
+  namespace: string;
+  matches: RepoSearchMatch[];
+  topMatch?: RepoSearchMatch;
+}
+
 export class DocIndexError extends Error {
   constructor(
     message: string,
@@ -133,5 +211,17 @@ export class DocIndexError extends Error {
     super(message);
     this.name = 'DocIndexError';
   }
+}
+
+export interface SemanticFileMetadata {
+  path: string;
+  language: string;
+  primaryPurpose: string;
+  architectureRole: string;
+  dependsOn: string[];
+  interactionType: string[];
+  complexity: 'low' | 'medium' | 'high' | 'unknown';
+  keyEntities: string[];
+  exports: string[];
 }
 

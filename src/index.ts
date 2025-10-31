@@ -15,6 +15,10 @@ import {
   IndexJob,
   CreateNamespaceOptions,
   CreateNamespaceResult,
+  IndexRepositoryOptions,
+  IndexRepositoryResult,
+  SearchCodebaseOptions,
+  SearchCodebaseResult,
 } from './types';
 import { indexDocumentation, searchFirecrawlUrls } from './firecrawl';
 import { searchDocumentation, searchDocumentationGrouped } from './search';
@@ -71,7 +75,9 @@ function generateJobId(): string {
   }
 }
 
-function sanitizeIndexOptions(options: IndexDocumentationOptions = {}): IndexDocumentationOptions {
+function sanitizeIndexDocumentationOptions(
+  options: IndexDocumentationOptions = {}
+): IndexDocumentationOptions {
   const sanitized: IndexDocumentationOptions = {};
   if (typeof options.maxPages === 'number' && Number.isFinite(options.maxPages)) {
     sanitized.maxPages = options.maxPages;
@@ -91,11 +97,42 @@ function sanitizeIndexOptions(options: IndexDocumentationOptions = {}): IndexDoc
   return sanitized;
 }
 
+function sanitizeIndexRepositoryOptions(
+  options: IndexRepositoryOptions = {}
+): IndexRepositoryOptions {
+  const sanitized: IndexRepositoryOptions = {};
+  if (typeof options.branch === 'string') {
+    sanitized.branch = options.branch.trim();
+  }
+  if (Array.isArray(options.languages)) {
+    const languages = options.languages
+      .map(lang => (typeof lang === 'string' ? lang.trim() : ''))
+      .filter(lang => lang.length > 0);
+    if (languages.length > 0) {
+      sanitized.languages = Array.from(new Set(languages));
+    }
+  }
+  if (typeof options.maxFiles === 'number' && Number.isFinite(options.maxFiles)) {
+    sanitized.maxFiles = options.maxFiles;
+  }
+  if (typeof options.maxFileSizeKb === 'number' && Number.isFinite(options.maxFileSizeKb)) {
+    sanitized.maxFileSizeKb = options.maxFileSizeKb;
+  }
+  if (typeof options.namespace === 'string') {
+    sanitized.namespace = options.namespace;
+  }
+  if (typeof options.enrichMetadata === 'boolean') {
+    sanitized.enrichMetadata = options.enrichMetadata;
+  }
+  return sanitized;
+}
+
 export class DocIndexSDK {
   private openaiKey: string;
   private pineconeKey: string;
   private indexName: string;
   private firecrawlKey: string | undefined;
+  private githubToken: string | undefined;
   private defaultNamespace: string | undefined;
 
   constructor(config: DocIndexConfig) {
@@ -103,6 +140,7 @@ export class DocIndexSDK {
     this.pineconeKey = config.pineconeKey;
     this.indexName = config.pineconeIndexName || 'doc-index';
     this.firecrawlKey = config.firecrawlKey;
+    this.githubToken = config.githubToken;
     const trimmedNamespace =
       typeof config.pineconeNamespace === 'string' ? config.pineconeNamespace.trim() : '';
     this.defaultNamespace = trimmedNamespace ? normalizeNamespace(trimmedNamespace) : undefined;
@@ -241,6 +279,31 @@ export class DocIndexSDK {
     );
   }
 
+  async indexRepo(
+    repo: string,
+    options: IndexRepositoryOptions = {},
+    onProgress?: (current: number, total: number) => void,
+    onLog?: (message: string, level?: 'info' | 'error') => void
+  ): Promise<IndexRepositoryResult> {
+    if (!this.githubToken) {
+      throw new Error('GitHub token is required for repository indexing');
+    }
+    const { index, namespace } = await this.getIndexContext(options.namespace, { require: true });
+    const { indexGithubRepository } = await import('./repo-indexer');
+    const sanitized = sanitizeIndexRepositoryOptions(options);
+    const { namespace: _ignoredNamespace, ...repoOptions } = sanitized;
+    return await indexGithubRepository({
+      index,
+      namespace,
+      repo,
+      openaiKey: this.openaiKey,
+      githubToken: this.githubToken,
+      options: repoOptions,
+      onProgress,
+      onLog,
+    });
+  }
+
   async enqueueIndexDocumentation(
     url: string,
     options: IndexDocumentationOptions = {}
@@ -253,11 +316,12 @@ export class DocIndexSDK {
     const requestOptions: IndexDocumentationOptions = { ...options, namespace };
     const jobId = generateJobId();
     const resourceId = `doc:${url}`;
-    const sanitizedOptions = sanitizeIndexOptions(requestOptions);
+    const sanitizedOptions = sanitizeIndexDocumentationOptions(requestOptions);
     const now = Date.now();
 
     const job: IndexJob = {
       id: jobId,
+      type: 'docs',
       resourceId,
       url,
       options: sanitizedOptions,
@@ -283,6 +347,53 @@ export class DocIndexSDK {
     return job;
   }
 
+  async enqueueIndexRepo(
+    repo: string,
+    options: IndexRepositoryOptions = {}
+  ): Promise<IndexJob> {
+    if (!this.githubToken) {
+      throw new Error('GitHub token is required for repository indexing');
+    }
+
+    const namespace = this.resolveNamespace(options.namespace, { require: true });
+    const requestOptions: IndexRepositoryOptions = { ...options, namespace };
+    const sanitizedOptions = sanitizeIndexRepositoryOptions(requestOptions);
+    const { parseGithubRepo } = await import('./repo-indexer');
+    const identity = parseGithubRepo(repo, sanitizedOptions.branch);
+    sanitizedOptions.branch = identity.branch;
+
+    const jobId = generateJobId();
+    const now = Date.now();
+
+    const job: IndexJob = {
+      id: jobId,
+      type: 'repo',
+      resourceId: identity.resourceId,
+      url: repo,
+      repo: identity.slug,
+      options: sanitizedOptions,
+      status: 'queued',
+      progress: { current: 0, total: 0 },
+      createdAt: now,
+      updatedAt: now,
+      logs: [],
+    };
+
+    await upsertJob(job);
+    await appendJobLog(jobId, `Queued background repository indexing for ${identity.slug}@${identity.branch}`);
+
+    try {
+      this.spawnBackgroundWorker(job);
+    } catch (error) {
+      const message = formatJobError(error);
+      await patchJob(jobId, { status: 'failed', error: message });
+      await appendJobLog(jobId, `Failed to launch background worker: ${message}`, 'error');
+      throw new Error(`Failed to start background repository job: ${message}`);
+    }
+
+    return job;
+  }
+
   async listIndexJobs(): Promise<IndexJob[]> {
     return await loadJobs();
   }
@@ -302,6 +413,7 @@ export class DocIndexSDK {
       pineconeIndexName: this.indexName,
       pineconeNamespace: jobNamespace,
       firecrawlKey: this.firecrawlKey,
+      githubToken: this.githubToken,
     });
 
     const child = fork(workerModulePath, [], {
@@ -366,6 +478,26 @@ export class DocIndexSDK {
       query,
       { ...options, namespace }
     );
+  }
+
+  async searchCodebase(
+    query: string,
+    options: SearchCodebaseOptions = {}
+  ): Promise<SearchCodebaseResult> {
+    const { index, namespace } = await this.getIndexContext(options.namespace, { require: true });
+    const { searchRepositoryCodebase } = await import('./repo-search');
+    const searchOptions: SearchCodebaseOptions = {
+      repo: options.repo,
+      topFileResults: options.topFileResults,
+      topSnippetResults: options.topSnippetResults,
+    };
+    return await searchRepositoryCodebase({
+      index,
+      namespace,
+      query,
+      openaiKey: this.openaiKey,
+      options: searchOptions,
+    });
   }
 
   async findDocs(
