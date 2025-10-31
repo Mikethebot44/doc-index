@@ -1,6 +1,6 @@
 {
   "name": "doc-index-sdk",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Index and search text documents using vector embeddings",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -38,7 +38,12 @@
     "dotenv": "^17.2.3",
     "openai": "^6.7.0",
     "ai": "^3.3.21",
-    "@ai-sdk/openai": "^1.1.10"
+    "@ai-sdk/openai": "^1.1.10",
+    "zod": "^3.23.8",
+    "remark-parse": "^11.0.0",
+    "unist-util-visit": "^5.0.0",
+    "mdast-util-to-string": "^4.0.0",
+    "unified": "^11.0.5"
   },
   "devDependencies": {
     "@types/node": "^24.9.1",

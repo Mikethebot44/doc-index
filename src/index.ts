@@ -14,10 +14,16 @@ import {
   AskAgentOptions,
   SummarizeOptions,
   IndexJob,
+  CreateNamespaceOptions,
+  CreateNamespaceResult,
+  IndexRepositoryOptions,
+  IndexRepositoryResult,
+  SearchCodebaseOptions,
+  SearchCodebaseResult,
 } from './types';
 import { indexDocumentation, searchFirecrawlUrls } from './firecrawl';
 import { searchDocumentation, searchDocumentationGrouped } from './search';
-import { getOrCreateIndex } from './pinecone';
+import { getOrCreateIndex, normalizeNamespace } from './pinecone';
 import { getEmbeddingDimensions, splitTextToTokenLimit } from './openai';
 import {
   listJobs as loadJobs,
@@ -70,7 +76,9 @@ function generateJobId(): string {
   }
 }
 
-function sanitizeIndexOptions(options: IndexDocumentationOptions = {}): IndexDocumentationOptions {
+function sanitizeIndexDocumentationOptions(
+  options: IndexDocumentationOptions = {}
+): IndexDocumentationOptions {
   const sanitized: IndexDocumentationOptions = {};
   if (typeof options.maxPages === 'number' && Number.isFinite(options.maxPages)) {
     sanitized.maxPages = options.maxPages;
@@ -84,6 +92,39 @@ function sanitizeIndexOptions(options: IndexDocumentationOptions = {}): IndexDoc
   if (Array.isArray(options.excludePaths)) {
     sanitized.excludePaths = [...options.excludePaths];
   }
+  if (typeof options.namespace === 'string') {
+    sanitized.namespace = options.namespace;
+  }
+  return sanitized;
+}
+
+function sanitizeIndexRepositoryOptions(
+  options: IndexRepositoryOptions = {}
+): IndexRepositoryOptions {
+  const sanitized: IndexRepositoryOptions = {};
+  if (typeof options.branch === 'string') {
+    sanitized.branch = options.branch.trim();
+  }
+  if (Array.isArray(options.languages)) {
+    const languages = options.languages
+      .map(lang => (typeof lang === 'string' ? lang.trim() : ''))
+      .filter(lang => lang.length > 0);
+    if (languages.length > 0) {
+      sanitized.languages = Array.from(new Set(languages));
+    }
+  }
+  if (typeof options.maxFiles === 'number' && Number.isFinite(options.maxFiles)) {
+    sanitized.maxFiles = options.maxFiles;
+  }
+  if (typeof options.maxFileSizeKb === 'number' && Number.isFinite(options.maxFileSizeKb)) {
+    sanitized.maxFileSizeKb = options.maxFileSizeKb;
+  }
+  if (typeof options.namespace === 'string') {
+    sanitized.namespace = options.namespace;
+  }
+  if (typeof options.enrichMetadata === 'boolean') {
+    sanitized.enrichMetadata = options.enrichMetadata;
+  }
   return sanitized;
 }
 
@@ -92,12 +133,49 @@ export class DocIndexSDK {
   private pineconeKey: string;
   private indexName: string;
   private firecrawlKey: string | undefined;
+  private githubToken: string | undefined;
+  private defaultNamespace: string | undefined;
 
   constructor(config: DocIndexConfig) {
     this.openaiKey = config.openaiKey;
     this.pineconeKey = config.pineconeKey;
     this.indexName = config.pineconeIndexName || 'doc-index';
     this.firecrawlKey = config.firecrawlKey;
+    this.githubToken = config.githubToken;
+    const trimmedNamespace =
+      typeof config.pineconeNamespace === 'string' ? config.pineconeNamespace.trim() : '';
+    this.defaultNamespace = trimmedNamespace ? normalizeNamespace(trimmedNamespace) : undefined;
+  }
+
+  private resolveNamespace(
+    namespace?: string,
+    options: { require?: boolean } = {}
+  ): string {
+    if (typeof namespace === 'string' && namespace.trim().length > 0) {
+      return normalizeNamespace(namespace);
+    }
+    if (this.defaultNamespace) {
+      return this.defaultNamespace;
+    }
+    if (options.require) {
+      throw new Error(
+        'Namespace is required for this operation. Provide a namespace via options or configure pineconeNamespace when creating DocIndexSDK.'
+      );
+    }
+    return normalizeNamespace(undefined);
+  }
+
+  private async getIndexContext(
+    namespace?: string,
+    options: { require?: boolean } = {}
+  ): Promise<{ index: any; namespace: string }> {
+    const resolvedNamespace = this.resolveNamespace(namespace, options);
+    const index = await getOrCreateIndex(
+      this.pineconeKey,
+      this.indexName,
+      getEmbeddingDimensions()
+    );
+    return { index, namespace: resolvedNamespace };
   }
 
   async summarizeDocumentation(
@@ -106,8 +184,12 @@ export class DocIndexSDK {
   ): Promise<string> {
     const topPages = options.topPages ?? 3;
     const modelName = options.model ?? 'gpt-5-mini';
+    const namespace = this.resolveNamespace(options.namespace);
 
-    const searchOptions: SearchOptions & { returnPage: boolean } = { returnPage: true };
+    const searchOptions: SearchOptions & { returnPage: boolean } = {
+      returnPage: true,
+      namespace,
+    };
     if (options.rerankEnabled !== undefined) {
       searchOptions.rerankEnabled = options.rerankEnabled;
     }
@@ -157,12 +239,29 @@ export class DocIndexSDK {
     question: string,
     options: AskAgentOptions = {}
   ): Promise<string> {
+    const namespace = this.resolveNamespace(options.namespace);
+    const agentOptions: AskAgentOptions = { ...options, namespace };
     const { runDocIndexAgent } = await import('./agent');
+    if (namespace !== this.defaultNamespace) {
+      const scopedSdk = new DocIndexSDK({
+        openaiKey: this.openaiKey,
+        pineconeKey: this.pineconeKey,
+        pineconeIndexName: this.indexName,
+        firecrawlKey: this.firecrawlKey,
+        pineconeNamespace: namespace,
+      });
+      return await runDocIndexAgent({
+        sdk: scopedSdk,
+        question,
+        openaiKey: this.openaiKey,
+        options: agentOptions,
+      });
+    }
     return await runDocIndexAgent({
       sdk: this,
       question,
       openaiKey: this.openaiKey,
-      options,
+      options: agentOptions,
     });
   }
 
@@ -175,21 +274,49 @@ export class DocIndexSDK {
     if (!this.firecrawlKey) {
       throw new Error('Firecrawl API key is required for indexing documentation');
     }
-    
+
+    const namespace = this.resolveNamespace(options.namespace, { require: true });
+    const requestOptions: IndexDocumentationOptions = { ...options, namespace };
+
     const wrappedProgress = onProgress ? (progress: { current: number; total: number }) => {
       onProgress(progress.current, progress.total);
     } : undefined;
-    
+
     return await indexDocumentation(
       this.openaiKey,
       this.pineconeKey,
       this.firecrawlKey,
       this.indexName,
       url,
-      options,
+      requestOptions,
       wrappedProgress,
       onLog
     );
+  }
+
+  async indexRepo(
+    repo: string,
+    options: IndexRepositoryOptions = {},
+    onProgress?: (current: number, total: number) => void,
+    onLog?: (message: string, level?: 'info' | 'error') => void
+  ): Promise<IndexRepositoryResult> {
+    if (!this.githubToken) {
+      throw new Error('GitHub token is required for repository indexing');
+    }
+    const { index, namespace } = await this.getIndexContext(options.namespace, { require: true });
+    const { indexGithubRepository } = await import('./repo-indexer');
+    const sanitized = sanitizeIndexRepositoryOptions(options);
+    const { namespace: _ignoredNamespace, ...repoOptions } = sanitized;
+    return await indexGithubRepository({
+      index,
+      namespace,
+      repo,
+      openaiKey: this.openaiKey,
+      githubToken: this.githubToken,
+      options: repoOptions,
+      onProgress,
+      onLog,
+    });
   }
 
   async enqueueIndexDocumentation(
@@ -200,13 +327,16 @@ export class DocIndexSDK {
       throw new Error('Firecrawl API key is required for indexing documentation');
     }
 
+    const namespace = this.resolveNamespace(options.namespace, { require: true });
+    const requestOptions: IndexDocumentationOptions = { ...options, namespace };
     const jobId = generateJobId();
     const resourceId = `doc:${url}`;
-    const sanitizedOptions = sanitizeIndexOptions(options);
+    const sanitizedOptions = sanitizeIndexDocumentationOptions(requestOptions);
     const now = Date.now();
 
     const job: IndexJob = {
       id: jobId,
+      type: 'docs',
       resourceId,
       url,
       options: sanitizedOptions,
@@ -232,6 +362,53 @@ export class DocIndexSDK {
     return job;
   }
 
+  async enqueueIndexRepo(
+    repo: string,
+    options: IndexRepositoryOptions = {}
+  ): Promise<IndexJob> {
+    if (!this.githubToken) {
+      throw new Error('GitHub token is required for repository indexing');
+    }
+
+    const namespace = this.resolveNamespace(options.namespace, { require: true });
+    const requestOptions: IndexRepositoryOptions = { ...options, namespace };
+    const sanitizedOptions = sanitizeIndexRepositoryOptions(requestOptions);
+    const { parseGithubRepo } = await import('./repo-indexer');
+    const identity = parseGithubRepo(repo, sanitizedOptions.branch);
+    sanitizedOptions.branch = identity.branch;
+
+    const jobId = generateJobId();
+    const now = Date.now();
+
+    const job: IndexJob = {
+      id: jobId,
+      type: 'repo',
+      resourceId: identity.resourceId,
+      url: repo,
+      repo: identity.slug,
+      options: sanitizedOptions,
+      status: 'queued',
+      progress: { current: 0, total: 0 },
+      createdAt: now,
+      updatedAt: now,
+      logs: [],
+    };
+
+    await upsertJob(job);
+    await appendJobLog(jobId, `Queued background repository indexing for ${identity.slug}@${identity.branch}`);
+
+    try {
+      this.spawnBackgroundWorker(job);
+    } catch (error) {
+      const message = formatJobError(error);
+      await patchJob(jobId, { status: 'failed', error: message });
+      await appendJobLog(jobId, `Failed to launch background worker: ${message}`, 'error');
+      throw new Error(`Failed to start background repository job: ${message}`);
+    }
+
+    return job;
+  }
+
   async listIndexJobs(): Promise<IndexJob[]> {
     return await loadJobs();
   }
@@ -244,11 +421,14 @@ export class DocIndexSDK {
   }
 
   private spawnBackgroundWorker(job: IndexJob): void {
+    const jobNamespace = this.resolveNamespace(job.options?.namespace, { require: true });
     const envConfig = JSON.stringify({
       openaiKey: this.openaiKey,
       pineconeKey: this.pineconeKey,
       pineconeIndexName: this.indexName,
+      pineconeNamespace: jobNamespace,
       firecrawlKey: this.firecrawlKey,
+      githubToken: this.githubToken,
     });
 
     const child = fork(workerModulePath, [], {
@@ -289,13 +469,15 @@ export class DocIndexSDK {
     sources?: string[],
     options: SearchOptions = {}
   ): Promise<SearchResult[]> {
+    const namespace = this.resolveNamespace(options.namespace);
+    const searchOptions: SearchOptions = { ...options, namespace };
     return await searchDocumentation(
       this.openaiKey,
       this.pineconeKey,
       this.indexName,
       query,
       sources,
-      options
+      searchOptions
     );
   }
 
@@ -303,13 +485,34 @@ export class DocIndexSDK {
     query: string,
     options: SearchOptions & { returnPage?: boolean; perPageLimit?: number } = {}
   ) {
+    const namespace = this.resolveNamespace(options.namespace);
     return await searchDocumentationGrouped(
       this.openaiKey,
       this.pineconeKey,
       this.indexName,
       query,
-      options
+      { ...options, namespace }
     );
+  }
+
+  async searchCodebase(
+    query: string,
+    options: SearchCodebaseOptions = {}
+  ): Promise<SearchCodebaseResult> {
+    const { index, namespace } = await this.getIndexContext(options.namespace, { require: true });
+    const { searchRepositoryCodebase } = await import('./repo-search');
+    const searchOptions: SearchCodebaseOptions = {
+      repo: options.repo,
+      topFileResults: options.topFileResults,
+      topSnippetResults: options.topSnippetResults,
+    };
+    return await searchRepositoryCodebase({
+      index,
+      namespace,
+      query,
+      openaiKey: this.openaiKey,
+      options: searchOptions,
+    });
   }
 
   async findDocs(
@@ -322,47 +525,145 @@ export class DocIndexSDK {
     return await searchFirecrawlUrls(this.firecrawlKey, query, options);
   }
 
-  async listResources(): Promise<Resource[]> {
+  async createNamespace(
+    name: string,
+    options: CreateNamespaceOptions = {}
+  ): Promise<CreateNamespaceResult> {
+    const normalized = typeof name === 'string' ? name.trim() : '';
+    if (!normalized) {
+      throw new Error('Namespace name is required');
+    }
+
+    const placeholderId = options.placeholderId?.trim() || `__namespace__:${normalized}`;
+    const dimensions = getEmbeddingDimensions();
+    const placeholderValues = Array(dimensions).fill(0);
+    if (placeholderValues.length > 0) {
+      // Pinecone requires at least one non-zero value per vector; ensure placeholder is valid
+      placeholderValues[0] = 1;
+    }
+
     const index = await getOrCreateIndex(
       this.pineconeKey,
       this.indexName,
-      getEmbeddingDimensions()
+      dimensions
     );
+
+    const namespaced =
+      typeof index.namespace === 'function' ? index.namespace(normalized) : undefined;
+    const target = namespaced ?? index;
+
+    let existed = false;
+    let existingMetadata: Record<string, unknown> | undefined;
+
+    if (typeof target.fetch === 'function') {
+      try {
+        const fetchRequest = namespaced
+          ? { ids: [placeholderId] }
+          : { ids: [placeholderId], namespace: normalized };
+        const response = await target.fetch(fetchRequest);
+        const fetched = response?.vectors?.[placeholderId];
+        if (fetched?.metadata && typeof fetched.metadata === 'object') {
+          existingMetadata = fetched.metadata as Record<string, unknown>;
+        }
+        if (fetched) {
+          existed = true;
+        }
+      } catch {
+        // Ignore fetch errors; we'll attempt creation regardless.
+      }
+    }
+
+    const metadata: Record<string, unknown> = {
+      type: '__namespace__',
+      namespace: normalized,
+    };
+
+    if (existingMetadata) {
+      Object.assign(metadata, existingMetadata);
+    }
+
+    if (options.metadata) {
+      Object.assign(metadata, options.metadata);
+    }
+
+    if (options.description) {
+      metadata.description = options.description;
+    }
+
+    metadata.type = '__namespace__';
+    metadata.namespace = normalized;
+
+    if (!('createdAt' in metadata)) {
+      metadata.createdAt = Date.now();
+    }
+
+    const vectorPayload = {
+      id: placeholderId,
+      values: placeholderValues,
+      metadata,
+    };
+
+    if (namespaced && typeof namespaced.upsert === 'function') {
+      await namespaced.upsert([vectorPayload]);
+    } else if (typeof target.upsert === 'function') {
+      try {
+        await target.upsert({
+          namespace: normalized,
+          vectors: [vectorPayload],
+        });
+      } catch (error) {
+        try {
+          await target.upsert([vectorPayload], normalized);
+        } catch {
+          throw error;
+        }
+      }
+    } else {
+      throw new Error('Pinecone client does not support namespace creation');
+    }
+
+    return {
+      name: normalized,
+      placeholderId,
+      created: !existed,
+      metadata,
+    };
+  }
+
+  async listResources(namespaceOverride?: string): Promise<Resource[]> {
+    const { index, namespace } = await this.getIndexContext(namespaceOverride);
     const { getResources: getResourcesFromIndex } = await import('./resource-manager');
-    return await getResourcesFromIndex(index);
+    return await getResourcesFromIndex(index, namespace);
   }
 
-  async getResource(resourceId: string): Promise<Resource | undefined> {
-    const index = await getOrCreateIndex(
-      this.pineconeKey,
-      this.indexName,
-      getEmbeddingDimensions()
-    );
+  async getResource(resourceId: string, namespaceOverride?: string): Promise<Resource | undefined> {
+    const { index, namespace } = await this.getIndexContext(namespaceOverride);
     const { getResource: getResourceFromIndex } = await import('./resource-manager');
-    return await getResourceFromIndex(index, resourceId);
+    return await getResourceFromIndex(index, resourceId, namespace);
   }
 
-  async checkResourceStatus(resourceId: string): Promise<Resource | undefined> {
-    return await this.getResource(resourceId);
+  async checkResourceStatus(resourceId: string, namespace?: string): Promise<Resource | undefined> {
+    return await this.getResource(resourceId, namespace);
   }
 
-  async renameResource(resourceId: string, newName: string): Promise<void> {
-    const index = await getOrCreateIndex(
-      this.pineconeKey,
-      this.indexName,
-      getEmbeddingDimensions()
-    );
+  async renameResource(
+    resourceId: string,
+    newName: string,
+    namespaceOverride?: string
+  ): Promise<void> {
+    const { index, namespace } = await this.getIndexContext(namespaceOverride, { require: true });
     const { updateResource: updateResourceMetadata } = await import('./resource-manager');
-    await updateResourceMetadata(index, resourceId, { name: newName });
-    
+    await updateResourceMetadata(index, resourceId, { name: newName }, namespace);
+
     const { queryVectors, upsertVectors } = await import('./pinecone');
     const matches = await queryVectors(
       index,
       Array(3072).fill(0),
       10000,
-      { resourceId: { $eq: resourceId } }
+      { resourceId: { $eq: resourceId } },
+      namespace
     );
-    
+
     const updates = matches.map(match => ({
       id: match.id as string,
       values: match.values as number[],
@@ -371,19 +672,15 @@ export class DocIndexSDK {
         resourceName: newName,
       } as any,
     }));
-    
-    await upsertVectors(index, updates);
+
+    await upsertVectors(index, updates, namespace);
   }
 
-  async deleteResource(resourceId: string): Promise<void> {
-    const index = await getOrCreateIndex(
-      this.pineconeKey,
-      this.indexName,
-      getEmbeddingDimensions()
-    );
+  async deleteResource(resourceId: string, namespaceOverride?: string): Promise<void> {
+    const { index, namespace } = await this.getIndexContext(namespaceOverride, { require: true });
     const { deleteResource: deleteResourceMetadata, deleteResourceFromPinecone: deleteVectorsFromPinecone } = await import('./resource-manager');
-    await deleteResourceMetadata(index, resourceId);
-    await deleteVectorsFromPinecone(index, resourceId);
+    await deleteResourceMetadata(index, resourceId, namespace);
+    await deleteVectorsFromPinecone(index, resourceId, namespace);
   }
 }
 

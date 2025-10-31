@@ -1,5 +1,5 @@
 import { generateEmbedding, getEmbeddingDimensions } from './openai';
-import { getOrCreateIndex, queryVectors, rerankMatches } from './pinecone';
+import { getOrCreateIndex, queryVectors, normalizeNamespace, rerankMatches } from './pinecone';
 import { getResources as getResourcesFromIndex } from './resource-manager';
 import { SearchResult, SearchOptions, Resource } from './types';
 
@@ -11,6 +11,7 @@ export async function searchDocumentation(
   sources?: string[],
   options: SearchOptions = {}
 ): Promise<SearchResult[]> {
+  const normalizedNamespace = normalizeNamespace(options.namespace);
   const index = await getOrCreateIndex(
     pineconeKey,
     indexName,
@@ -37,7 +38,8 @@ export async function searchDocumentation(
     index,
     queryEmbedding,
     options.limit || 10,
-    Object.keys(filter).length > 0 ? filter : undefined
+    Object.keys(filter).length > 0 ? filter : undefined,
+    normalizedNamespace
   );
 
   // Optionally rerank using Pinecone hosted Cohere Rerank 3.5
@@ -70,13 +72,14 @@ export async function searchDocumentationGrouped(
   query: string,
   options: SearchOptions & { returnPage?: boolean; perPageLimit?: number } = {}
 ) {
+  const namespace = normalizeNamespace(options.namespace);
   const results = await searchDocumentation(
     openaiKey,
     pineconeKey,
     indexName,
     query,
     undefined,
-    options
+    { ...options, namespace }
   );
   const perPageLimit = options.perPageLimit ?? 5;
 
@@ -107,9 +110,12 @@ export async function searchDocumentationGrouped(
   );
   const assembled: Array<{ url: string; score: number; page: string }> = [];
   for (const p of pages) {
-    const all = await queryVectors(index, Array(3072).fill(0), 10000, { url: { $eq: p.url } });
+    const all = await queryVectors(index, Array(3072).fill(0), 10000, { url: { $eq: p.url } }, namespace);
     all.sort((a: any, b: any) => String(a.id).localeCompare(String(b.id)));
-    const pageMarkdown = all.map((m: any) => (m.metadata as any).content).join('\n\n');
+    const pageMarkdown = all
+      .filter((m: any) => (m.metadata as any).level !== 'file')
+      .map((m: any) => (m.metadata as any).content)
+      .join('\n\n');
     assembled.push({ url: p.url, score: p.score, page: pageMarkdown });
   }
   return assembled;
@@ -118,16 +124,17 @@ export async function searchDocumentationGrouped(
 export async function listDocumentationSources(
   pineconeKey: string,
   indexName: string,
-  status?: 'indexing' | 'ready' | 'error'
+  status?: 'indexing' | 'ready' | 'error',
+  namespace?: string
 ): Promise<Resource[]> {
   const index = await getOrCreateIndex(
     pineconeKey,
     indexName,
     getEmbeddingDimensions()
   );
-  const resources = await getResourcesFromIndex(index);
+  const resources = await getResourcesFromIndex(index, namespace);
   let filtered = resources.filter(r => r.type === 'doc');
-  
+
   if (status) {
     filtered = filtered.filter(r => r.status === status);
   }

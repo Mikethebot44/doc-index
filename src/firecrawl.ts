@@ -1,15 +1,22 @@
 import { chunkMarkdownSmart, TextChunk } from './chunking';
 import { generateEmbeddings, splitTextToTokenLimit } from './openai';
-import { upsertVectors, getOrCreateIndex } from './pinecone';
+import { upsertVectors, getOrCreateIndex, normalizeNamespace } from './pinecone';
 import { retry } from './utils/retry';
 import { addResource, updateResource, getResource, deleteResource, deleteResourceFromPinecone } from './resource-manager';
 import {
   VectorRecord,
+  VectorMetadata,
   Resource,
   IndexDocumentationOptions,
   FindDocsOptions,
   FindDocsResult,
+  SemanticDocumentMetadata,
 } from './types';
+import {
+  extractMarkdownMetadata,
+  generateSemanticDocMetadata,
+  MarkdownDocumentMetadata,
+} from './doc-metadata';
 import { getEmbeddingDimensions } from './openai';
 
 const FIRECRAWL_API_BASE = 'https://api.firecrawl.dev/v2';
@@ -96,6 +103,7 @@ export async function indexDocumentation(
 ): Promise<string> {
   const resourceId = `doc:${url}`;
   const resourceName = new URL(url).hostname;
+  const namespace = normalizeNamespace(options.namespace);
   const log = (message: string, level: 'info' | 'error' = 'info') => {
     if (typeof logCallback === 'function') {
       logCallback(message, level);
@@ -114,12 +122,12 @@ export async function indexDocumentation(
     getEmbeddingDimensions()
   );
 
-  const existingResource = await getResource(index, resourceId);
+  const existingResource = await getResource(index, resourceId, namespace);
   if (existingResource) {
     log(`Replacing existing resource for ${url}`);
     try {
-      await deleteResourceFromPinecone(index, resourceId);
-      await deleteResource(index, resourceId);
+      await deleteResourceFromPinecone(index, resourceId, namespace);
+      await deleteResource(index, resourceId, namespace);
       log(`Removed previous resource data for ${url}`);
     } catch (cleanupError) {
       const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
@@ -136,9 +144,10 @@ export async function indexDocumentation(
     totalChunks: 0,
     createdAt: Date.now(),
     updatedAt: Date.now(),
+    enrichedCount: 0,
   };
-  
-  await addResource(index, resource);
+
+  await addResource(index, resource, namespace);
   log(`Started indexing for ${url}`);
   
   try {
@@ -156,11 +165,28 @@ export async function indexDocumentation(
     const docs = crawlData;
 
     // Build per-page chunks and log scrape events
-    const pages: Array<{ url: string; content: string; chunks: TextChunk[] }> = [];
+    const pages: Array<{
+      url: string;
+      content: string;
+      chunks: TextChunk[];
+      metadata: MarkdownDocumentMetadata;
+      semantic?: SemanticDocumentMetadata;
+    }> = [];
+    let enrichedPages = 0;
     for (const doc of docs) {
       const pageUrl = doc.url || doc.metadata?.sourceURL || url;
       const content = doc.markdown || doc.html || doc.rawHtml || '';
       if (!content || typeof content !== 'string') continue;
+      const mdMetadata = extractMarkdownMetadata(content, { url: pageUrl, path: pageUrl });
+      let semanticMetadata: SemanticDocumentMetadata | undefined;
+      try {
+        semanticMetadata = await generateSemanticDocMetadata(openaiKey, mdMetadata);
+      } catch {
+        semanticMetadata = undefined;
+      }
+      if (semanticMetadata) {
+        enrichedPages += 1;
+      }
       const chunks = await chunkMarkdownSmart(openaiKey, content, {
         minTokens: 500,
         targetTokens: 1200,
@@ -168,7 +194,7 @@ export async function indexDocumentation(
         similarityDrop: 0.2,
       });
       log(`Scraped: ${pageUrl}`);
-      pages.push({ url: pageUrl, content, chunks });
+      pages.push({ url: pageUrl, content, chunks, metadata: mdMetadata, semantic: semanticMetadata });
     }
 
     const totalChunks = pages.reduce((sum, p) => sum + p.chunks.length, 0);
@@ -177,57 +203,117 @@ export async function indexDocumentation(
     }
 
     resource.totalChunks = totalChunks;
-    await updateResource(index, resourceId, { totalChunks });
+    await updateResource(index, resourceId, { totalChunks, enrichedCount: enrichedPages }, namespace);
 
     // Index per page to emit granular logs
     let processed = 0;
     for (const page of pages) {
       if (page.chunks.length === 0) continue;
-      // Page-level vector (anchor) from first token-safe slice of full page
-      const pageSlices = await splitTextToTokenLimit(openaiKey, page.content, 8192);
-      if (pageSlices.length > 0) {
-        const pageVec = await generateEmbeddings(openaiKey, [pageSlices[0]]);
-        await upsertVectors(index, [{
-          id: `${resourceId}:${page.url}:page`,
-          values: pageVec[0],
-          metadata: {
+      // File-level vector enriched with semantic metadata
+      const fileSummaryParts: string[] = [
+        `URL: ${page.url}`,
+        `Headings: ${page.metadata.headings.join(' | ') || 'None'}`,
+        `Summary: ${page.metadata.summary || 'None'}`,
+        `Code languages: ${page.metadata.codeLanguages.join(', ') || 'none'}`,
+        `Links: ${page.metadata.links.slice(0, 8).join(', ') || 'none'}`,
+        `Word count: ${page.metadata.wordCount}`,
+      ];
+      if (page.semantic) {
+        fileSummaryParts.push(
+          `Primary purpose: ${page.semantic.primaryPurpose}`,
+          `Audience: ${page.semantic.audience}`,
+          `Topics: ${page.semantic.topics.join(', ') || 'none'}`,
+          `Complexity: ${page.semantic.complexity}`,
+          `Code examples: ${page.semantic.hasCodeExamples ? 'yes' : 'no'}`,
+          `Content type: ${page.semantic.contentType}`
+        );
+      }
+      const fileTextRepresentation = fileSummaryParts.join('\n');
+      const fileEmbedding = await generateEmbeddings(openaiKey, [fileTextRepresentation]);
+      const fileMetadata: VectorMetadata = {
+        type: 'doc',
+        level: 'file',
+        resourceId,
+        resourceName,
+        url: page.url,
+        content: fileTextRepresentation,
+        indexed: Date.now(),
+        headings: page.metadata.headings,
+        codeLanguages: page.metadata.codeLanguages,
+        wordCount: page.metadata.wordCount,
+        topics: page.metadata.topics,
+        hasCodeExamples: page.semantic?.hasCodeExamples ?? (page.metadata.codeLanguages.length > 0),
+        contentType: page.semantic?.contentType ?? 'documentation',
+        audience: page.semantic?.audience,
+      };
+      if (page.semantic) {
+        fileMetadata.primaryPurpose = page.semantic.primaryPurpose;
+        fileMetadata.audience = page.semantic.audience;
+        fileMetadata.topics = page.semantic.topics;
+        fileMetadata.complexity = page.semantic.complexity;
+        fileMetadata.hasCodeExamples = page.semantic.hasCodeExamples;
+        fileMetadata.contentType = page.semantic.contentType;
+        try {
+          fileMetadata.semanticJson = JSON.stringify(page.semantic);
+        } catch {
+          fileMetadata.semanticJson = undefined;
+        }
+      }
+      await upsertVectors(index, [
+        {
+          id: `${resourceId}:${page.url}:file`,
+          values: fileEmbedding[0],
+          metadata: fileMetadata,
+        },
+      ], namespace);
+
+      // Token-aware sub-splitting per chunk (snippet level)
+      const tokenSafeTexts: string[] = [];
+      const snippetMetadata: VectorMetadata[] = [];
+      for (const chunk of page.chunks) {
+        const parts = await splitTextToTokenLimit(openaiKey, chunk.text, 8192);
+        for (const part of parts) {
+          tokenSafeTexts.push(part);
+          const snippetMeta: VectorMetadata = {
             type: 'doc',
-            level: 'page',
+            level: 'snippet',
             resourceId,
             resourceName,
             url: page.url,
-            content: pageSlices[0],
+            content: part,
             indexed: Date.now(),
-          },
-        }]);
-      }
-      // Token-aware sub-splitting per chunk to stay under model limit
-      const tokenSafeTexts: string[] = [];
-      for (const chunk of page.chunks) {
-        const parts = await splitTextToTokenLimit(openaiKey, chunk.text, 8192);
-        tokenSafeTexts.push(...parts);
+            headings: page.metadata.headings,
+            topics: page.metadata.topics,
+            codeLanguages: page.metadata.codeLanguages,
+            hasCodeExamples: page.metadata.codeLanguages.length > 0,
+            contentType: 'documentation',
+          };
+          if (page.semantic) {
+            snippetMeta.primaryPurpose = page.semantic.primaryPurpose;
+            snippetMeta.topics = page.semantic.topics;
+            snippetMeta.complexity = page.semantic.complexity;
+            snippetMeta.audience = page.semantic.audience;
+            snippetMeta.hasCodeExamples = page.semantic.hasCodeExamples;
+            snippetMeta.contentType = page.semantic.contentType;
+            snippetMeta.semanticJson = fileMetadata.semanticJson;
+          }
+          snippetMetadata.push(snippetMeta);
+        }
       }
       const pageEmbeddings = await generateEmbeddings(openaiKey, tokenSafeTexts);
       const vectors: VectorRecord[] = tokenSafeTexts.map((text, i) => ({
         id: `${resourceId}:${page.url}:chunk:${i}`,
         values: pageEmbeddings[i],
-        metadata: {
-          type: 'doc',
-          resourceId,
-          resourceName,
-          url: page.url,
-          content: text,
-          indexed: Date.now(),
-        },
+        metadata: snippetMetadata[i],
       }));
-      await upsertVectors(index, vectors);
+      await upsertVectors(index, vectors, namespace);
       processed += tokenSafeTexts.length;
-      await updateResource(index, resourceId, { chunksProcessed: processed, updatedAt: Date.now() });
+      await updateResource(index, resourceId, { chunksProcessed: processed, enrichedCount: enrichedPages, updatedAt: Date.now() }, namespace);
       log(`Indexed: ${page.url} (${tokenSafeTexts.length} chunks)`);
       if (progressCallback) progressCallback({ current: processed, total: totalChunks });
     }
 
-    await updateResource(index, resourceId, { status: 'ready', updatedAt: Date.now() });
+    await updateResource(index, resourceId, { status: 'ready', enrichedCount: enrichedPages, updatedAt: Date.now() }, namespace);
     log(`Completed indexing for ${url}`);
     return resourceId;
   } catch (error) {
@@ -236,7 +322,7 @@ export async function indexDocumentation(
       status: 'error',
       error: error instanceof Error ? error.message : String(error),
       updatedAt: Date.now(),
-    });
+    }, namespace);
     throw error;
   }
 }
