@@ -7,7 +7,7 @@ export interface VectorMetadata {
   resourceName: string;
   content: string;
   url?: string;
-  level?: 'page' | 'chunk';
+  level?: 'page' | 'chunk' | 'file' | 'snippet';
   indexed: number;
   granularity?: RepoGranularity;
   repo?: string;
@@ -26,6 +26,13 @@ export interface VectorMetadata {
   interactionType?: string[];
   complexity?: 'low' | 'medium' | 'high' | 'unknown';
   keyEntities?: string[];
+  audience?: string;
+  topics?: string[];
+  hasCodeExamples?: boolean;
+  contentType?: string;
+  headings?: string[];
+  codeLanguages?: string[];
+  wordCount?: number;
 }
 
 export interface VectorRecord {
@@ -223,5 +230,17 @@ export interface SemanticFileMetadata {
   complexity: 'low' | 'medium' | 'high' | 'unknown';
   keyEntities: string[];
   exports: string[];
+}
+
+export interface SemanticDocumentMetadata {
+  url: string;
+  path?: string;
+  primaryPurpose: string;
+  audience: string;
+  topics: string[];
+  complexity: 'low' | 'medium' | 'high' | 'unknown';
+  hasCodeExamples: boolean;
+  contentType: string;
+  headings: string[];
 }
 

@@ -96,7 +96,10 @@ export async function searchDocumentationGrouped(
   for (const p of pages) {
     const all = await queryVectors(index, Array(3072).fill(0), 10000, { url: { $eq: p.url } }, namespace);
     all.sort((a: any, b: any) => String(a.id).localeCompare(String(b.id)));
-    const pageMarkdown = all.map((m: any) => (m.metadata as any).content).join('\n\n');
+    const pageMarkdown = all
+      .filter((m: any) => (m.metadata as any).level !== 'file')
+      .map((m: any) => (m.metadata as any).content)
+      .join('\n\n');
     assembled.push({ url: p.url, score: p.score, page: pageMarkdown });
   }
   return assembled;

@@ -8,6 +8,7 @@ Index, enrich, and search documentation using OpenAI embeddings, Pinecone vector
 - Control crawls with prompts plus include/exclude filters, and receive structured progress logs
 - Semantic chunking keeps sentence-level context together for improved recall
 - Natural language search with grouped or raw results, optional page reconstruction, and source filtering
+- File-level semantic metadata for both code and documentation, powered by lightweight LLM extraction
 - Firecrawl-powered discovery for new documentation sources from the web, GitHub, or academic sites
 - Summaries powered by OpenAI with automatic token-aware content trimming
 - Background job tracking with resumable history, log streaming, and metadata repairs
@@ -107,6 +108,8 @@ Options:
 - `-n, --namespace <name>` – Pinecone namespace to target (default: `__default__`)
 
 Foreground runs stream progress updates (`Progress: <current>/<total> chunks indexed`) and Firecrawl logs in place. When `--background` is used the command exits immediately after queuing and prints the job ID and resource ID so you can monitor it later.
+
+Behind the scenes the SDK now produces *both* file-level and snippet-level embeddings for each documentation page. A lightweight MDAST pass extracts headings, links, and code languages; a fast LLM call infers semantic attributes (purpose, audience, complexity, topics), and these are embedded alongside the existing sentence-aware snippet chunks. The result is hierarchical retrieval parity with code repositories—high-level doc summaries surface quickly while deeper snippets remain available for precise answers.
 
 ### Index a GitHub Repository
 
@@ -312,6 +315,9 @@ const summary = await sdk.summarizeDocumentation('kick off ingestion flow', {
   model: 'gpt-5-mini',
   namespace: 'docs-team',
 });
+
+// Each result now carries file-level metadata such as primaryPurpose, audience, topics, etc.
+console.log(searchResults[0].metadata.primaryPurpose);
 ```
 
 ### Discover New Sources

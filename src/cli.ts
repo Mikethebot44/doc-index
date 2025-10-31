@@ -723,9 +723,9 @@ program
           if (typeof resource.snippetCount === 'number') {
             console.log(`Snippets: ${resource.snippetCount}`);
           }
-          if (typeof resource.enrichedCount === 'number') {
-            console.log(`Metadata enriched: ${resource.enrichedCount}`);
-          }
+        }
+        if (typeof resource.enrichedCount === 'number') {
+          console.log(`Metadata enriched: ${resource.enrichedCount}`);
         }
         if (resource.error) {
           console.log(`Error: ${resource.error}`);
@@ -803,9 +803,9 @@ program
                 if (typeof resource.snippetCount === 'number') {
                   console.log(`   Snippets: ${resource.snippetCount}`);
                 }
-                if (typeof resource.enrichedCount === 'number') {
-                  console.log(`   Metadata enriched: ${resource.enrichedCount}`);
-                }
+              }
+              if (typeof resource.enrichedCount === 'number') {
+                console.log(`   Metadata enriched: ${resource.enrichedCount}`);
               }
               console.log(`   Updated: ${new Date(resource.updatedAt).toISOString()}`);
               if (resource.error) {
