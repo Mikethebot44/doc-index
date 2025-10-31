@@ -239,6 +239,9 @@ export async function runDocIndexAgent({
   const temperature = options.temperature ?? DEFAULT_TEMPERATURE;
   const maxToolRoundtrips = options.maxToolRoundtrips ?? DEFAULT_MAX_TOOL_ROUNDTRIPS;
   const onToken = options.onToken;
+  const rerankEnabled = options.rerankEnabled;
+  const rerankModel = options.rerankModel;
+  const rerankTopN = options.rerankTopN;
 
   let resourceContext = '';
   if (options.includeResourceList) {
@@ -324,10 +327,19 @@ export async function runDocIndexAgent({
         };
         const cappedLimit = limit ?? 5;
         try {
+          const rerankOptions =
+            rerankEnabled !== undefined || rerankModel || rerankTopN !== undefined
+              ? {
+                  rerankEnabled,
+                  rerankModel,
+                  rerankTopN,
+                }
+              : undefined;
           if (grouped || returnPage) {
             const results = await sdk.searchDocumentationGrouped(query, {
               limit: cappedLimit,
               returnPage: Boolean(returnPage),
+              ...(rerankOptions ?? {}),
             });
             return {
               type: 'grouped',
@@ -336,6 +348,7 @@ export async function runDocIndexAgent({
           }
           const results = await sdk.searchDocumentation(query, undefined, {
             limit: cappedLimit,
+            ...(rerankOptions ?? {}),
           });
           return {
             type: 'flat',
@@ -389,6 +402,9 @@ export async function runDocIndexAgent({
           const summary = await sdk.summarizeDocumentation(query, {
             topPages: topPages ?? 3,
             model: summaryModel ?? undefined,
+            rerankEnabled,
+            rerankModel,
+            rerankTopN,
           });
           return {
             summary,

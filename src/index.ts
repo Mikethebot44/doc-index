@@ -12,6 +12,7 @@ import {
   FindDocsOptions,
   FindDocsResult,
   AskAgentOptions,
+  SummarizeOptions,
   IndexJob,
 } from './types';
 import { indexDocumentation, searchFirecrawlUrls } from './firecrawl';
@@ -101,12 +102,23 @@ export class DocIndexSDK {
 
   async summarizeDocumentation(
     query: string,
-    options: { topPages?: number; model?: string } = {}
+    options: SummarizeOptions = {}
   ): Promise<string> {
     const topPages = options.topPages ?? 3;
     const modelName = options.model ?? 'gpt-5-mini';
 
-    const pages = await this.searchDocumentationGrouped(query, { returnPage: true });
+    const searchOptions: SearchOptions & { returnPage: boolean } = { returnPage: true };
+    if (options.rerankEnabled !== undefined) {
+      searchOptions.rerankEnabled = options.rerankEnabled;
+    }
+    if (options.rerankModel) {
+      searchOptions.rerankModel = options.rerankModel;
+    }
+    if (options.rerankTopN !== undefined) {
+      searchOptions.rerankTopN = options.rerankTopN;
+    }
+
+    const pages = await this.searchDocumentationGrouped(query, searchOptions);
     const top = (pages as any[]).slice(0, topPages);
     if (!top || top.length === 0) {
       throw new Error('No matching documents found to summarize');

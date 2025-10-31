@@ -103,12 +103,23 @@ export interface FindDocsResult {
   score?: number;
 }
 
+export interface SummarizeOptions {
+  topPages?: number;
+  model?: string;
+  rerankEnabled?: boolean;
+  rerankModel?: string;
+  rerankTopN?: number;
+}
+
 export interface AskAgentOptions {
   model?: string;
   temperature?: number;
   maxToolRoundtrips?: number;
   includeResourceList?: boolean;
   onToken?: (chunk: string) => void;
+  rerankEnabled?: boolean;
+  rerankModel?: string;
+  rerankTopN?: number;
 }
 
 export class DocIndexError extends Error {

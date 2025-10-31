@@ -177,6 +177,8 @@ program
   .option('-l, --limit <limit>', 'Maximum number of results', '10')
   .option('--grouped', 'Group results by page URL', false)
   .option('--return-page', 'Return assembled page markdown', false)
+  .option('--rerank', 'Enable reranking before returning results')
+  .option('--no-rerank', 'Disable reranking and use raw vector scores')
   .action(async (query, options) => {
     const config = getConfig();
     const sdk = new DocIndexSDK(config);
@@ -193,10 +195,16 @@ program
     };
 
     try {
+      const hasRerankFlag = Object.prototype.hasOwnProperty.call(options, 'rerank');
+      const rerankOptions = hasRerankFlag ? { rerankEnabled: Boolean(options.rerank) } : {};
+      const parsedLimit = Number.parseInt(options.limit, 10);
+      const limit = Number.isFinite(parsedLimit) ? parsedLimit : 10;
+
       if (options.grouped || options.returnPage) {
         const grouped = await sdk.searchDocumentationGrouped(query, {
-          limit: parseInt(options.limit),
+          limit,
           returnPage: Boolean(options.returnPage),
+          ...rerankOptions,
         });
         stopSpinner();
         if (options.returnPage) {
@@ -218,7 +226,10 @@ program
         const results = await sdk.searchDocumentation(
           query,
           options.sources.length > 0 ? options.sources : undefined,
-          { limit: parseInt(options.limit) }
+          {
+            limit,
+            ...rerankOptions,
+          }
         );
         stopSpinner();
         console.log(`Found ${results.length} results:`);
@@ -307,6 +318,8 @@ program
   .argument('<query>', 'Query to summarize against')
   .option('--top <n>', 'Number of top pages', '3')
   .option('--model <model>', 'LLM model to use', 'gpt-5-mini')
+  .option('--rerank', 'Enable reranking before summarization retrieval')
+  .option('--no-rerank', 'Disable reranking for summarization retrieval')
   .action(async (query, options) => {
     const config = getConfig();
     const sdk = new DocIndexSDK(config);
@@ -319,9 +332,12 @@ program
       stopIndicatorInternal();
     };
     try {
+      const hasRerankFlag = Object.prototype.hasOwnProperty.call(options, 'rerank');
+      const rerankOptions = hasRerankFlag ? { rerankEnabled: Boolean(options.rerank) } : {};
       const summary = await sdk.summarizeDocumentation(query, {
         topPages: parseInt(options.top),
         model: options.model,
+        ...rerankOptions,
       });
       stopSpinner();
       console.log(summary);
@@ -340,6 +356,8 @@ program
   .option('--steps <count>', 'Maximum number of tool round-trips', '4')
   .option('--temperature <value>', 'Sampling temperature for the model', '0.2')
   .option('--include-resources', 'Include the indexed resource list as agent context', false)
+  .option('--rerank', 'Enable reranking for agent retrieval tools')
+  .option('--no-rerank', 'Disable reranking for agent retrieval tools')
   .action(async (questionWords: string[], options) => {
     const config = getConfig();
     const sdk = new DocIndexSDK(config);
@@ -365,6 +383,9 @@ program
         maxToolRoundtrips: Number.isFinite(steps) ? steps : undefined,
         temperature: Number.isFinite(temperature) ? temperature : undefined,
         includeResourceList: Boolean(options.includeResources),
+        ...(Object.prototype.hasOwnProperty.call(options, 'rerank')
+          ? { rerankEnabled: Boolean(options.rerank) }
+          : {}),
         onToken: chunk => {
           if (!chunk) return;
           if (!sawStreamChunk) {
