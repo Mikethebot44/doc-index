@@ -3,9 +3,12 @@ export interface RetryOptions {
   initialDelay?: number;
   maxDelay?: number;
   backoffFactor?: number;
+  shouldRetry?: (error: Error) => boolean;
 }
 
-const DEFAULT_OPTIONS: Required<RetryOptions> = {
+type CoreRetryOptions = Omit<RetryOptions, 'shouldRetry'>;
+
+const DEFAULT_OPTIONS: Required<CoreRetryOptions> = {
   maxRetries: 3,
   initialDelay: 1000,
   maxDelay: 30000,
@@ -14,9 +17,20 @@ const DEFAULT_OPTIONS: Required<RetryOptions> = {
 
 export async function retry<T>(
   fn: () => Promise<T>,
-  options?: RetryOptions
+  options?: RetryOptions | ((error: Error) => boolean)
 ): Promise<T> {
-  const opts = { ...DEFAULT_OPTIONS, ...options };
+  let shouldRetry: (error: Error) => boolean = () => true;
+  let opts: Required<CoreRetryOptions>;
+
+  if (typeof options === 'function') {
+    shouldRetry = options;
+    opts = { ...DEFAULT_OPTIONS };
+  } else {
+    const { shouldRetry: customShouldRetry, ...rest } = options ?? {};
+    shouldRetry = customShouldRetry ?? (() => true);
+    opts = { ...DEFAULT_OPTIONS, ...rest };
+  }
+
   let lastError: Error | undefined;
   
   for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {
@@ -24,14 +38,17 @@ export async function retry<T>(
       return await fn();
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
-      
-      if (attempt < opts.maxRetries) {
-        const delay = Math.min(
-          opts.initialDelay * Math.pow(opts.backoffFactor, attempt),
-          opts.maxDelay
-        );
-        await sleep(delay);
+
+      const canRetry = attempt < opts.maxRetries && shouldRetry(lastError);
+      if (!canRetry) {
+        break;
       }
+
+      const delay = Math.min(
+        opts.initialDelay * Math.pow(opts.backoffFactor, attempt),
+        opts.maxDelay
+      );
+      await sleep(delay);
     }
   }
   

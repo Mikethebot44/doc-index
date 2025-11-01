@@ -1,3 +1,4 @@
+import { Buffer } from 'buffer';
 import { fork } from 'child_process';
 import { randomUUID } from 'crypto';
 import { existsSync } from 'fs';
@@ -6,6 +7,7 @@ import { fileURLToPath } from 'url';
 import {
   DocIndexConfig,
   IndexDocumentationOptions,
+  IndexSourceInput,
   SearchOptions,
   SearchResult,
   Resource,
@@ -20,11 +22,14 @@ import {
   IndexRepositoryResult,
   SearchCodebaseOptions,
   SearchCodebaseResult,
+  QueryInput,
+  VectorMetadata,
+  Modality,
 } from './types';
 import { indexDocumentation, searchFirecrawlUrls } from './firecrawl';
 import { searchDocumentation, searchDocumentationGrouped } from './search';
-import { getOrCreateIndex, normalizeNamespace } from './pinecone';
-import { getEmbeddingDimensions, splitTextToTokenLimit } from './openai';
+import { getOrCreateIndex, normalizeNamespace, queryVectors } from './pinecone';
+import { getEmbeddingDimensions, getClipEmbeddingDimensions, splitTextToTokenLimit } from './openai';
 import {
   listJobs as loadJobs,
   getJob as loadJob,
@@ -32,6 +37,9 @@ import {
   updateJob as patchJob,
   appendJobLog,
 } from './job-store';
+import { detectModality } from './utils/modality';
+import { WhisperAudioEncoder } from './encoders/audio';
+import { ClipImageEncoder } from './encoders/image';
 
 const workerModulePath = resolveWorkerModulePath();
 
@@ -128,10 +136,32 @@ function sanitizeIndexRepositoryOptions(
   return sanitized;
 }
 
+function ensureVectorMetadata(
+  metadata: unknown,
+  modality?: Modality
+): VectorMetadata {
+  if (metadata && typeof metadata === 'object') {
+    const typed = metadata as VectorMetadata;
+    if (modality && !typed.modality) {
+      return { ...typed, modality };
+    }
+    return typed;
+  }
+  return {
+    type: 'doc',
+    resourceId: 'unknown',
+    resourceName: 'unknown',
+    content: '',
+    indexed: 0,
+    modality,
+  } as VectorMetadata;
+}
+
 export class DocIndexSDK {
   private openaiKey: string;
   private pineconeKey: string;
   private indexName: string;
+  private imageIndexName: string;
   private firecrawlKey: string | undefined;
   private githubToken: string | undefined;
   private defaultNamespace: string | undefined;
@@ -140,6 +170,10 @@ export class DocIndexSDK {
     this.openaiKey = config.openaiKey;
     this.pineconeKey = config.pineconeKey;
     this.indexName = config.pineconeIndexName || 'doc-index';
+    const configuredImageIndex = typeof config.pineconeImageIndexName === 'string'
+      ? config.pineconeImageIndexName.trim()
+      : '';
+    this.imageIndexName = configuredImageIndex || `${this.indexName}-image`;
     this.firecrawlKey = config.firecrawlKey;
     this.githubToken = config.githubToken;
     const trimmedNamespace =
@@ -174,6 +208,19 @@ export class DocIndexSDK {
       this.pineconeKey,
       this.indexName,
       getEmbeddingDimensions()
+    );
+    return { index, namespace: resolvedNamespace };
+  }
+
+  private async getImageIndexContext(
+    namespace?: string,
+    options: { require?: boolean } = {}
+  ): Promise<{ index: any; namespace: string }> {
+    const resolvedNamespace = this.resolveNamespace(namespace, options);
+    const index = await getOrCreateIndex(
+      this.pineconeKey,
+      this.imageIndexName,
+      getClipEmbeddingDimensions()
     );
     return { index, namespace: resolvedNamespace };
   }
@@ -263,6 +310,66 @@ export class DocIndexSDK {
       openaiKey: this.openaiKey,
       options: agentOptions,
     });
+  }
+
+  async index(
+    request: IndexSourceInput,
+    onProgress?: (current: number, total: number) => void,
+    onLog?: (message: string, level?: 'info' | 'error') => void
+  ): Promise<string> {
+    if (!request || !request.source) {
+      throw new Error('An input source is required for indexing.');
+    }
+
+    const { index: textIndex, namespace } = await this.getIndexContext(request.namespace, { require: true });
+    const detection = detectModality(request.source, {
+      mimeType: request.mimeType,
+      filename: request.name,
+    });
+
+    const mimeType = request.mimeType ?? detection.mimeType;
+    let resolvedModality = detection.modality;
+    if (resolvedModality === 'text') {
+      if (mimeType && mimeType.startsWith('image/')) {
+        resolvedModality = 'image';
+      } else if (mimeType && mimeType.startsWith('audio/')) {
+        resolvedModality = 'audio';
+      } else if (Buffer.isBuffer(request.source)) {
+        resolvedModality = 'audio';
+      }
+    }
+
+    if (resolvedModality === 'audio') {
+      const { indexAudioSource } = await import('./modalities/audio-indexer');
+      return await indexAudioSource({
+        ...request,
+        namespace,
+        openaiKey: this.openaiKey,
+        index: textIndex,
+        mimeType: request.mimeType ?? detection.mimeType,
+        onProgress,
+        onLog,
+      });
+    }
+
+    if (resolvedModality === 'image') {
+      const { index: imageIndex } = await this.getImageIndexContext(namespace, { require: true });
+      const { indexImageSource } = await import('./modalities/image-indexer');
+      return await indexImageSource({
+        ...request,
+        namespace,
+        openaiKey: this.openaiKey,
+        textIndex,
+        imageIndex,
+        mimeType: request.mimeType ?? detection.mimeType,
+        onProgress,
+        onLog,
+      });
+    }
+
+    throw new Error(
+      `Modality '${resolvedModality}' is not supported yet. Supported modalities: audio, image.`
+    );
   }
 
   async indexDocumentation(
@@ -426,6 +533,7 @@ export class DocIndexSDK {
       openaiKey: this.openaiKey,
       pineconeKey: this.pineconeKey,
       pineconeIndexName: this.indexName,
+      pineconeImageIndexName: this.imageIndexName,
       pineconeNamespace: jobNamespace,
       firecrawlKey: this.firecrawlKey,
       githubToken: this.githubToken,
@@ -464,6 +572,102 @@ export class DocIndexSDK {
     child.unref();
   }
 
+  async query(input: QueryInput, options: SearchOptions = {}): Promise<SearchResult[]> {
+    if (typeof input === 'string') {
+      return await this.searchDocumentation(input, undefined, options);
+    }
+
+    if (input && typeof input === 'object' && 'text' in input && typeof input.text === 'string') {
+      return await this.searchDocumentation(input.text, undefined, options);
+    }
+
+    let binaryData: Buffer | undefined;
+    let mimeType: string | undefined;
+    let filename: string | undefined;
+
+    if (Buffer.isBuffer(input)) {
+      binaryData = input;
+    } else if (input && typeof input === 'object' && 'data' in input && Buffer.isBuffer(input.data)) {
+      binaryData = input.data;
+      mimeType = input.mimeType;
+      filename = input.filename;
+    }
+
+    if (!binaryData) {
+      throw new Error('Unsupported query input. Provide text, audio, or image data.');
+    }
+
+    const detection = detectModality(binaryData, {
+      mimeType,
+      filename,
+    });
+
+    const resolvedMimeType = mimeType ?? detection.mimeType;
+    let modality = detection.modality;
+    if (modality === 'text' && resolvedMimeType) {
+      if (resolvedMimeType.startsWith('image/')) {
+        modality = 'image';
+      } else if (resolvedMimeType.startsWith('audio/')) {
+        modality = 'audio';
+      }
+    }
+
+    if (modality === 'audio') {
+      const encoder = new WhisperAudioEncoder(this.openaiKey);
+      const transcription = await encoder.transcribe({
+        data: binaryData,
+        mimeType: resolvedMimeType,
+        filename,
+      });
+      const transcript = transcription.text.trim();
+      if (!transcript) {
+        throw new Error('The audio query could not be transcribed.');
+      }
+      return await this.searchDocumentation(transcript, undefined, options);
+    }
+
+    if (modality === 'image') {
+      const { index: imageIndex, namespace } = await this.getImageIndexContext(options.namespace, { require: true });
+      const encoder = new ClipImageEncoder(this.openaiKey);
+      const vector = await encoder.embed({
+        data: binaryData,
+        mimeType: resolvedMimeType,
+        source: filename,
+      });
+      const filter: Record<string, any> = {
+        modality: { $eq: 'image' },
+      };
+      if (options.filter?.resourceId && options.filter.resourceId.length > 0) {
+        filter.resourceId = { $in: options.filter.resourceId };
+      }
+      if (options.filter?.url) {
+        filter.url = { $regex: options.filter.url };
+      }
+      const limit = options.limit || 10;
+      const matches = await queryVectors(
+        imageIndex,
+        vector,
+        limit,
+        Object.keys(filter).length > 0 ? filter : undefined,
+        namespace
+      );
+
+      return matches.map(match => {
+        const metadata = ensureVectorMetadata(match.metadata, 'image');
+        if (!metadata.contentType) {
+          metadata.contentType = 'image';
+        }
+        return {
+          id: match.id as string,
+          score: match.score || 0,
+          metadata,
+        } as SearchResult;
+      });
+    }
+
+    throw new Error(`Unsupported query modality '${modality}'. Provide text, audio, or image data.`);
+  }
+
   async searchDocumentation(
     query: string,
     sources?: string[],
@@ -477,7 +681,8 @@ export class DocIndexSDK {
       this.indexName,
       query,
       sources,
-      searchOptions
+      searchOptions,
+      { imageIndexName: this.imageIndexName }
     );
   }
 

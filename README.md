@@ -233,6 +233,7 @@ const sdk = new DocIndexSDK({
   pineconeKey: process.env.PINECONE_API_KEY!,
   firecrawlKey: process.env.FIRECRAWL_API_KEY!,
   pineconeIndexName: process.env.PINECONE_INDEX_NAME,
+  pineconeImageIndexName: process.env.PINECONE_IMAGE_INDEX_NAME,
   pineconeNamespace: process.env.PINECONE_NAMESPACE,
   githubToken: process.env.GITHUB_TOKEN || process.env.DOC_INDEX_GITHUB_TOKEN,
 });
@@ -297,6 +298,51 @@ Additional helpers:
 - `await sdk.listIndexJobs()` – fetch persisted job history
 - `await sdk.checkResourceStatus(resourceId)` – latest metadata for an indexed resource
 
+### Index Audio Sources (Foreground)
+
+```typescript
+const resourceId = await sdk.index(
+  {
+    source: '/recordings/all-hands.mp3',
+    namespace: 'docs-team',
+    name: 'All Hands – March 2025',
+  },
+  (current, total) => {
+    console.log(`Embedded ${current}/${total} transcript chunks`);
+  },
+  message => console.log(message),
+);
+```
+
+Under the hood, the SDK detects that the input is audio, transcribes it with the
+Vercel AI SDK Whisper models, embeds the resulting transcript using
+`text-embedding-3-large`, and stores the vectors with `modality: 'audio'` metadata
+in Pinecone. Non-audio sources currently throw so it is safe to gate pipelines on
+this call today.
+
+### Index Image Sources (Foreground)
+
+```typescript
+const imageId = await sdk.index(
+  {
+    source: 'assets/diagrams/ingestion.png',
+    namespace: 'docs-team',
+    name: 'Ingestion diagram',
+    description: 'Data ingestion pipeline overview diagram',
+    metadata: {
+      url: 'https://docs.example.com/assets/ingestion.png',
+    },
+  },
+  undefined,
+  message => console.log(message),
+);
+```
+
+Images are embedded with OpenAI CLIP (`clip-embedding-1`) and written to a
+separate Pinecone index (512 dimensions). Resource metadata is still managed in
+the primary text index so downstream tooling can discover assets alongside
+transcripts and documents.
+
 ### Search and Summarise
 
 ```typescript
@@ -318,6 +364,25 @@ const grouped = await sdk.searchDocumentationGrouped('webhooks', {
   returnPage: true,
   namespace: 'docs-team',
 });
+
+// Audio queries: supply a buffer and the SDK will transcribe then search
+import { readFile } from 'fs/promises';
+
+const audioQueryResults = await sdk.query({
+  data: await readFile('/recordings/snippet.wav'),
+  mimeType: 'audio/wav',
+  filename: 'snippet.wav',
+}, { namespace: 'docs-team' });
+
+// Image queries: provide binary data and retrieve visually similar assets
+const imageQueryResults = await sdk.query({
+  data: await readFile('assets/pipeline.png'),
+  mimeType: 'image/png',
+  filename: 'pipeline.png',
+}, { namespace: 'docs-team' });
+
+// Text queries now perform late-fusion over text + image indices using
+// confidence-weighted scores, so diagram hits surface alongside prose.
 
 const summary = await sdk.summarizeDocumentation('kick off ingestion flow', {
   topPages: 3,

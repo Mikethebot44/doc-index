@@ -1,5 +1,8 @@
+import type { Buffer } from 'node:buffer';
+
 export type VectorType = 'doc' | 'repo';
 export type RepoGranularity = 'file' | 'snippet';
+export type Modality = 'text' | 'image' | 'audio' | 'video';
 
 export interface VectorMetadata {
   type: VectorType;
@@ -7,6 +10,9 @@ export interface VectorMetadata {
   resourceName: string;
   content: string;
   url?: string;
+  mediaType?: string;
+  mediaUrl?: string;
+  thumbnailUrl?: string;
   level?: 'page' | 'chunk' | 'file' | 'snippet';
   indexed: number;
   granularity?: RepoGranularity;
@@ -33,6 +39,8 @@ export interface VectorMetadata {
   headings?: string[];
   codeLanguages?: string[];
   wordCount?: number;
+  modality?: Modality;
+  durationSeconds?: number;
 }
 
 export interface VectorRecord {
@@ -56,6 +64,10 @@ export interface Resource {
   fileCount?: number;
   snippetCount?: number;
   enrichedCount?: number;
+  modality?: Modality;
+  mediaUrl?: string;
+  mediaType?: string;
+  durationSeconds?: number;
 }
 
 export interface SearchResult {
@@ -68,6 +80,7 @@ export interface DocIndexConfig {
   openaiKey: string;
   pineconeKey: string;
   pineconeIndexName?: string;
+  pineconeImageIndexName?: string;
   firecrawlKey?: string;
   pineconeNamespace?: string;
   githubToken?: string;
@@ -200,6 +213,26 @@ export interface SearchCodebaseOptions {
   repo?: string;
   topFileResults?: number;
   topSnippetResults?: number;
+}
+
+export type QueryInput =
+  | string
+  | Buffer
+  | {
+      data: Buffer;
+      mimeType?: string;
+      text?: string;
+      filename?: string;
+    };
+
+export interface IndexSourceInput {
+  source: string | Buffer;
+  namespace?: string;
+  mimeType?: string;
+  id?: string;
+  name?: string;
+  metadata?: Partial<VectorMetadata>;
+  description?: string;
 }
 
 export interface RepoSearchMatch {

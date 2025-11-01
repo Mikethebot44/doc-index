@@ -6,6 +6,8 @@ const BATCH_SIZE = 2048;
 const OPENAI_MODEL = 'text-embedding-3-large';
 const OPENAI_DIMENSIONS = 3072;
 const TOKENIZER_MODEL = 'gpt-4o-mini';
+const CLIP_MODEL = 'clip';
+const CLIP_DIMENSIONS = 512;
 
 export async function generateEmbedding(
   openaiKey: string,
@@ -66,6 +68,32 @@ export function getEmbeddingDimensions(): number {
   return OPENAI_DIMENSIONS;
 }
 
+export function getClipEmbeddingDimensions(): number {
+  return CLIP_DIMENSIONS;
+}
+
+export async function generateClipEmbedding(
+  openaiKey: string,
+  input: string
+): Promise<number[]> {
+  try {
+    const openai = new OpenAI({ apiKey: openaiKey });
+    const response = await retry(
+      async () => {
+        const result = await openai.embeddings.create({
+          model: CLIP_MODEL,
+          input,
+        });
+        return result;
+      },
+      isRateLimitError
+    );
+    return response.data[0].embedding;
+  } catch (error) {
+    handleError(error, 'Failed to generate CLIP embedding');
+  }
+}
+
 export async function countTokens(
   openaiKey: string,
   text: string
@@ -112,4 +140,3 @@ export async function splitTextToTokenLimit(
   if (b.length > 0) parts.push(...(await splitTextToTokenLimit(openaiKey, b, maxTokens)));
   return parts;
 }
-
